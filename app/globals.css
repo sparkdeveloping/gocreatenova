@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@theme {
+  /* system */
+  --color-background: #ffffff;
+  --color-foreground: #171717;
+  --color-slate-900: #0f172a;
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-background: #0a0a0a;
+    --color-foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+}
