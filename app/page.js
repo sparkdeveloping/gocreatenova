@@ -12,8 +12,11 @@ import {
   query,
   where,
   getDocs,
-  limit,               // ← add this
+  limit,               // ← keep
+  addDoc,              // ← NEW
+  serverTimestamp,     // ← NEW
 } from 'firebase/firestore';
+
 import { app } from './lib/firebase';
 import CornerUtilities from './components/CornerUtilities';
 import { useUser } from './context/UserContext';
@@ -36,6 +39,7 @@ export default function NovaPublicHome() {
   const { refreshRoles, setCurrentUser } = useUser();
   const router = useRouter();
   const db = getFirestore(app);
+const kioskId = 'front-desk-1'; // or any stable string that identifies this station
 
   // Preload roles (cheap no-op if already cached)
   useEffect(() => { refreshRoles(false); }, [refreshRoles]);
@@ -118,7 +122,6 @@ const handleScan = async (code) => {
         try {
           const qs = query(usersCol, where(field, '==', val), limit(1));
           const snap = await getDocs(qs);
-          console.log("found snap: ", snap.docs[0]?.data());
           if (!snap.empty) { hit = snap.docs[0]; break; }
         } catch (e) {
           // ignore and try the next combo
@@ -129,23 +132,65 @@ const handleScan = async (code) => {
     }
 
     if (!hit) {
+      // log NOT FOUND scan for /sessions "Last Scan" card
+      await addDoc(collection(db, 'scans'), {
+        badgeCode,
+        matchedUserId: null,
+        user: null,
+        status: 'not_found',
+        createdAt: serverTimestamp(),
+        kioskId,
+      });
+
       openBadgeError();
       return;
     }
 
-    const scanned = { id: hit.id, ...hit.data() };
+    // we found a user — embed minimal user data for quick display
+    const data = hit.data() || {};
+    const matchedUser = {
+      id: hit.id,
+      name: data.fullName || data.name || '',
+      photoURL: data.photoURL || null,
+    };
+
+    // log MATCHED scan for /sessions
+    await addDoc(collection(db, 'scans'), {
+      badgeCode,
+      matchedUserId: hit.id,
+      user: matchedUser,
+      status: 'matched',
+      createdAt: serverTimestamp(),
+      kioskId,
+    });
+
+    const scanned = { id: hit.id, ...data };
     localStorage.setItem('nova-user', JSON.stringify(scanned));
     setCurrentUser(scanned);
 
     // use replace so the kiosk can't "back" to the scanner
     router.replace('/checkin');
-    console.log("Routing to /checkin with", scanned);
-
+    console.log('Routing to /checkin with', scanned);
   } catch (err) {
     console.error('Scan lookup error:', err);
+
+    // Log as error so /sessions still sees the attempt
+    try {
+      await addDoc(collection(db, 'scans'), {
+        badgeCode: digitsOnly(code).slice(0, 5) || null,
+        matchedUserId: null,
+        user: null,
+        status: 'error',
+        errorMessage: String(err?.message || err),
+        createdAt: serverTimestamp(),
+        kioskId,
+      });
+    } catch (_) {}
+
     openBadgeError();
   }
 };
+
 
 
   // Sounds
