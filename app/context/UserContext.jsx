@@ -20,6 +20,7 @@ import {
 } from 'firebase/firestore';
 import { app } from '../lib/firebase';
 import { useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 
 const UserContext = createContext(null);
 
@@ -50,6 +51,7 @@ function writeRolesCache(roles) {
 export const UserProvider = ({ children }) => {
   const db = getFirestore(app);
   const router = useRouter();
+const pathname = usePathname();
 
   // ---- Users ----
   const [currentUser, setCurrentUser] = useState(null);
@@ -165,20 +167,25 @@ export const UserProvider = ({ children }) => {
     (async () => {
       try {
         const stored = localStorage.getItem('nova-user');
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          const userDoc = await getDoc(doc(db, 'users', parsed.id));
+        if (pathname.startsWith('/sessions')) {
+  // Skip auth enforcement on migration route
+  await fetchAllUsers();
+  await refreshRoles(false);
+} else if (stored) {
+  const parsed = JSON.parse(stored);
+  const userDoc = await getDoc(doc(db, 'users', parsed.id));
 
-          if (userDoc.exists()) {
-            setCurrentUser({ id: userDoc.id, ...userDoc.data() });
-            await fetchAllUsers();
-          } else {
-            localStorage.removeItem('nova-user');
-            router.replace('/');
-          }
-        } else {
-          router.replace('/');
-        }
+  if (userDoc.exists()) {
+    setCurrentUser({ id: userDoc.id, ...userDoc.data() });
+    await fetchAllUsers();
+  } else {
+    localStorage.removeItem('nova-user');
+    router.replace('/');
+  }
+} else {
+  router.replace('/');
+}
+
 
         await refreshRoles(false);
       } finally {

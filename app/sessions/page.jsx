@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import Image from 'next/image';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   getFirestore,
@@ -21,10 +21,7 @@ import {
   BadgeCheck,
   Clock,
   ScanLine,
-  Table2,
-  LayoutGrid,
   Download,
-  Search,
   CalendarRange,
   AlertCircle,
   UserPlus,
@@ -38,7 +35,7 @@ import 'react-date-range/dist/theme/default.css';
 
 import CornerUtilities from '../components/CornerUtilities';
 
-// ——— shared UI from your /users page ———
+// shared UI
 import CardShell from '@/app/components/ui/CardShell';
 import FilterPills from '@/app/components/ui/FilterPills';
 import SearchInput from '@/app/components/ui/SearchInput';
@@ -69,59 +66,53 @@ function toDateMaybe(v) {
 export default function SessionsPage() {
   const db = getFirestore(app);
 
-  // sessions
   const [sessions, setSessions] = useState([]);
   const [filteredSessions, setFilteredSessions] = useState([]);
 
-  // UI filters (mirror your /users capsule vibe)
-  const [mode, setMode] = useState('all'); // 'all' | 'members' | 'employees'
-  const [employeeRole, setEmployeeRole] = useState('all'); // 'all' | 'staff' | 'tech' | 'student tech'
-  const [viewMode, setViewMode] = useState('table'); // 'table' | 'card'
+  const [mode, setMode] = useState('all');
+  const [employeeRole, setEmployeeRole] = useState('all');
+  const [viewMode, setViewMode] = useState('table');
   const [searchTerm, setSearchTerm] = useState('');
 
-  // date filter
   const [dateRange, setDateRange] = useState([{ startDate: null, endDate: null, key: 'selection' }]);
   const [showDatePicker, setShowDatePicker] = useState(false);
 
-  // session modal (unchanged behavior)
   const [modalSession, setModalSession] = useState(null);
 
-  // NEW: last scan (left panel)
   const [lastScan, setLastScan] = useState(null);
   const [assignOpen, setAssignOpen] = useState(false);
 
-  // For quick assign modal
   const [allUsers, setAllUsers] = useState([]);
   const [assignSearch, setAssignSearch] = useState('');
 
-  // ——— fetch sessions (same as you had, one-shot is fine) ———
+  // REAL-TIME sessions
   useEffect(() => {
-    (async () => {
-      const snap = await getDocs(collection(db, 'sessions'));
-      const fetched = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setSessions(fetched);
-      setFilteredSessions(fetched);
-    })();
+    const sessionsRef = collection(db, 'sessions');
+    const qSess = query(sessionsRef, orderBy('startTime', 'desc'));
+    const unsub = onSnapshot(qSess, (snap) => {
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setSessions(list);
+      setFilteredSessions(list);
+    });
+    return () => unsub();
   }, [db]);
 
-  // ——— live listener for the most recent scan ———
+  // Live last scan
   useEffect(() => {
-    const scansRef = collection(db, 'scans'); // root/page.jsx will write here
+    const scansRef = collection(db, 'scans');
     const qScans = query(scansRef, orderBy('createdAt', 'desc'), fsLimit(1));
-    const unsub = onSnapshot(qScans, async (snap) => {
+    const unsub = onSnapshot(qScans, (snap) => {
       if (snap.empty) {
         setLastScan(null);
         return;
       }
       const scan = { id: snap.docs[0].id, ...snap.docs[0].data() };
-      // If the scan already embedded a user object, cool. If only userId, we can fetch it,
-      // but we’ll stay lightweight here and rely on assign UI search. We still show the code.
       setLastScan(scan);
     });
     return () => unsub();
   }, [db]);
 
-  // ——— preload users for quick-assign modal (used only when opened) ———
+  // Preload users when opening Assign modal
   useEffect(() => {
     if (!assignOpen || allUsers.length) return;
     (async () => {
@@ -131,11 +122,10 @@ export default function SessionsPage() {
     })();
   }, [assignOpen, allUsers.length, db]);
 
-  // ——— filter logic for sessions (capsule style like /users) ———
+  // Filter logic
   useEffect(() => {
     let list = [...sessions];
 
-    // role bucket
     if (mode === 'members') {
       list = list.filter((s) => !isEmployee(s.member));
     } else if (mode === 'employees') {
@@ -147,26 +137,24 @@ export default function SessionsPage() {
       }
     }
 
-    // name search
     const q = byLower(searchTerm);
     if (q) {
       list = list.filter((s) => (s.member?.name || '').toLowerCase().includes(q));
     }
 
-    // date bounds
     const { startDate, endDate } = dateRange[0] || {};
     if (startDate && endDate) {
       list = list.filter((s) => {
         const start = toDateMaybe(s.startTime);
         if (!start) return false;
         return start >= startDate && start <= endDate;
-        });
+      });
     }
 
     setFilteredSessions(list);
   }, [sessions, mode, employeeRole, searchTerm, dateRange]);
 
-  // ——— counts for stat boxes ———
+  // counts
   const memberCount = useMemo(
     () => sessions.filter((s) => !isEmployee(s.member)).length,
     [sessions]
@@ -188,7 +176,7 @@ export default function SessionsPage() {
     [sessions]
   );
 
-  // ——— utils ———
+  // utils
   const formatDuration = (start, end) => {
     if (!start) return '';
     const startTime = start?.toDate ? start.toDate() : new Date(start);
@@ -198,7 +186,6 @@ export default function SessionsPage() {
     const mins = dur.minutes || 0;
     return `${hours}h ${mins}m`;
   };
-
   const readableType = (type) => (type === 'ClockIn' ? 'Shift' : 'Regular');
 
   const exportCSV = () => {
@@ -219,7 +206,7 @@ export default function SessionsPage() {
     saveAs(blob, 'sessions.csv');
   };
 
-  // ——— assign badge to a selected user ———
+  // Assign badge to selected user
   const handleAssignToUser = async (user) => {
     if (!lastScan?.badgeCode || !user?.id) return;
     const uref = doc(getFirestore(app), 'users', user.id);
@@ -229,8 +216,6 @@ export default function SessionsPage() {
         badgeNumber: Number(lastScan.badgeCode) || null,
       },
     }).catch(() => {});
-
-    // optional: mark scan as assigned
     try {
       if (lastScan?.id) {
         await updateDoc(doc(db, 'scans', lastScan.id), {
@@ -238,17 +223,26 @@ export default function SessionsPage() {
           status: 'assigned',
         });
       }
-    } catch (e) {}
-
+    } catch (_) {}
     setAssignOpen(false);
   };
 
+  // Lock body scroll when any modal is open
+  useEffect(() => {
+    const anyOpen = !!modalSession || assignOpen;
+    if (anyOpen) {
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => { document.body.style.overflow = prev; };
+    }
+  }, [modalSession, assignOpen]);
+
   return (
-    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white px-4 py-6 text-slate-900">
+    <div className="relative min-h-screen bg-gradient-to-br from-white via-slate-100 to-white px-4 py-6 text-slate-900">
       <CornerUtilities />
 
-      {/* Two-up layout: Left = Last Scan, Right = Sessions */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 max-w-[1800px] mx-auto">
+      {/* Side-by-side */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-[1800px] mx-auto">
         {/* LEFT: LAST SCAN */}
         <CardShell>
           <div className="flex items-center justify-between gap-2 mb-2">
@@ -260,7 +254,9 @@ export default function SessionsPage() {
                     ? 'bg-emerald-100 text-emerald-700'
                     : lastScan.status === 'assigned'
                       ? 'bg-blue-100 text-blue-700'
-                      : 'bg-amber-100 text-amber-700'
+                      : lastScan.status === 'error'
+                        ? 'bg-rose-100 text-rose-700'
+                        : 'bg-amber-100 text-amber-700'
                 }`}
               >
                 {String(lastScan.status).toUpperCase()}
@@ -287,9 +283,7 @@ export default function SessionsPage() {
               className="rounded-[2rem] border border-slate-200 bg-white/70 p-6 shadow"
             >
               <div className="flex items-start gap-4">
-                {/* Avatar / Icon */}
                 <div className="w-16 h-16 rounded-2xl bg-slate-100 grid place-items-center overflow-hidden">
-                  {/* If kiosk posted an embedded user.photoURL, show it; else icon */}
                   {lastScan?.user?.photoURL ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
@@ -302,7 +296,6 @@ export default function SessionsPage() {
                   )}
                 </div>
 
-                {/* Info */}
                 <div className="flex-1">
                   <div className="text-xl font-bold">
                     {lastScan?.user?.name || 'No user matched'}
@@ -317,7 +310,6 @@ export default function SessionsPage() {
                       : '—'}
                   </div>
 
-                  {/* If matched user, provide quick link */}
                   {lastScan?.user?.id && (
                     <div className="mt-4 flex flex-wrap items-center gap-2">
                       <Link
@@ -329,7 +321,6 @@ export default function SessionsPage() {
                     </div>
                   )}
 
-                  {/* If NOT matched, show Assign action */}
                   {!lastScan?.user?.id && !lastScan?.matchedUserId && (
                     <div className="mt-4">
                       <div className="flex items-center gap-2 text-amber-700 bg-amber-50 rounded-xl px-3 py-2 border border-amber-200 w-fit">
@@ -403,7 +394,7 @@ export default function SessionsPage() {
             <StatBox label="Student Techs" count={studentTechCount} />
           </div>
 
-          {/* Capsule filters (uniform with /users) */}
+          {/* Capsule filters */}
           <div className="mt-4">
             <FilterPills
               value={mode}
@@ -541,7 +532,7 @@ export default function SessionsPage() {
         </CardShell>
       </div>
 
-      {/* Session Modal (unchanged) */}
+      {/* Session Modal */}
       <SessionModal
         session={modalSession}
         onClose={() => setModalSession(null)}
@@ -561,9 +552,37 @@ export default function SessionsPage() {
   );
 }
 
-// —————————————————————————————————————————————
-// Small components (local)
-// —————————————————————————————————————————————
+/* —————————————————————————————————————————————
+   Modal Portal (ensures top-level z layer)
+————————————————————————————————————————————— */
+function ModalPortal({ children }) {
+  const [container, setContainer] = useState(null);
+
+  useEffect(() => {
+    const el = document.createElement('div');
+    el.setAttribute('data-modal-root', ''); // helpful for debugging
+    Object.assign(el.style, {
+      position: 'fixed',
+      inset: '0px',
+      zIndex: String(2147483647), // max 32-bit
+      pointerEvents: 'auto',
+    });
+    document.body.appendChild(el);
+    setContainer(el);
+
+    return () => {
+      try { document.body.removeChild(el); } catch {}
+    };
+  }, []);
+
+  if (!container) return null;
+  return createPortal(children, container);
+}
+
+
+/* —————————————————————————————————————————————
+   Local components
+————————————————————————————————————————————— */
 
 function SessionModal({ session, onClose }) {
   const [activeTab, setActiveTab] = useState('current');
@@ -575,180 +594,187 @@ function SessionModal({ session, onClose }) {
   const statusVerb = session.type === 'ClockIn' ? 'Clocked' : 'Checked';
 
   return (
-    <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        className="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center"
-        onClick={onClose}
-      >
+    <ModalPortal>
+      <AnimatePresence>
         <motion.div
-          initial={{ y: 50, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          exit={{ y: 50, opacity: 0 }}
-          onClick={(e) => e.stopPropagation()}
-          className="bg-white/80 backdrop-blur-md rounded-[2rem] shadow-xl w-full max-w-md p-6 space-y-4"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-[2147483647] flex items-center justify-center p-4 md:p-8 bg-white/40 backdrop-blur-lg supports-[backdrop-filter]:bg-white/30"
+          style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
+          onClick={onClose}
         >
-          <h2 className="text-xl font-bold">Session Details</h2>
+          <motion.div
+            initial={{ y: 40, opacity: 0, scale: 0.98 }}
+            animate={{ y: 0, opacity: 1, scale: 1 }}
+            exit={{ y: 24, opacity: 0, scale: 0.98 }}
+            transition={{ duration: 0.22, ease: 'easeOut' }}
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white/90 backdrop-blur-md rounded-[2rem] shadow-2xl border border-slate-200 w-[min(92vw,40rem)] max-h-[85vh] overflow-y-auto p-6 space-y-4"
+          >
+            <h2 className="text-xl font-bold">Session Details</h2>
 
-          <div className="space-y-1 text-sm text-slate-700">
-            <div><strong>Name:</strong> {session.member?.name}</div>
-            <div><strong>Badge:</strong> {session.member?.badgeId || session.member?.badge?.id || 'N/A'}</div>
-            <div><strong>Type:</strong> {type}</div>
-            <Link href={`/users/${session.member?.id}`}>
-              <button className="mt-2 text-blue-500 text-xs hover:underline">
-                View Profile
-              </button>
-            </Link>
-          </div>
+            <div className="space-y-1 text-sm text-slate-700">
+              <div><strong>Name:</strong> {session.member?.name}</div>
+              <div><strong>Badge:</strong> {session.member?.badgeId || session.member?.badge?.id || 'N/A'}</div>
+              <div><strong>Type:</strong> {type}</div>
+              <Link href={`/users/${session.member?.id}`}>
+                <button className="mt-2 text-blue-500 text-xs hover:underline">
+                  View Profile
+                </button>
+              </Link>
+            </div>
 
-          <div className="flex gap-2 mt-4 border-b border-slate-200">
-            {['Current Session', 'All Sessions'].map((tab) => (
+            <div className="flex gap-2 mt-4 border-b border-slate-200">
+              {['Current Session', 'All Sessions'].map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab === 'Current Session' ? 'current' : 'all')}
+                  className={`px-2 pb-1 text-sm ${
+                    activeTab === (tab === 'Current Session' ? 'current' : 'all')
+                      ? 'border-b-2 border-blue-500 text-blue-500'
+                      : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            <div className="text-sm text-slate-700 space-y-1 mt-2">
+              {activeTab === 'current' ? (
+                <>
+                  <div>{statusVerb} in at {start.toLocaleString()}</div>
+                  {end && <div>{statusVerb} out at {end.toLocaleString()}</div>}
+                </>
+              ) : (
+                <div>Empty logs (future feature)</div>
+              )}
+            </div>
+
+            <div className="flex justify-end mt-4">
               <button
-                key={tab}
-                onClick={() => setActiveTab(tab === 'Current Session' ? 'current' : 'all')}
-                className={`px-2 pb-1 text-sm ${
-                  activeTab === (tab === 'Current Session' ? 'current' : 'all')
-                    ? 'border-b-2 border-blue-500 text-blue-500'
-                    : 'text-slate-500 hover:text-slate-700'
-                }`}
+                onClick={onClose}
+                className="px-4 py-2 rounded-full bg-blue-500 text-white hover:bg-blue-600 text-sm transition"
               >
-                {tab}
+                Close
               </button>
-            ))}
-          </div>
-
-          <div className="text-sm text-slate-700 space-y-1 mt-2">
-            {activeTab === 'current' ? (
-              <>
-                <div>{statusVerb} in at {start.toLocaleString()}</div>
-                {end && <div>{statusVerb} out at {end.toLocaleString()}</div>}
-              </>
-            ) : (
-              <div>Empty logs (future feature)</div>
-            )}
-          </div>
-
-          <div className="flex justify-end mt-4">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 rounded-full bg-blue-500 text-white hover:bg-blue-600 text-sm transition"
-            >
-              Close
-            </button>
-          </div>
+            </div>
+          </motion.div>
         </motion.div>
-      </motion.div>
-    </AnimatePresence>
+      </AnimatePresence>
+    </ModalPortal>
   );
 }
 
 function AssignBadgeModal({ open, onClose, badgeCode, users, search, setSearch, onAssign }) {
   if (!open) return null;
-  const q = byLower(search);
 
+  const q = (search || '').trim().toLowerCase();
   const filtered = (users || []).filter((u) => {
     const name = (u.fullName || u.name || '').toLowerCase();
     const badgeId = String(u.badge?.id || u.badgeId || '').toLowerCase();
-    return (
-      name.includes(q) ||
-      (!!q && badgeId === q) ||
-      (!!q && String(u.id).toLowerCase() === q)
-    );
+    const uid = String(u.id || '').toLowerCase();
+    return name.includes(q) || (!!q && badgeId === q) || (!!q && uid === q);
   });
 
   return (
-    <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60"
-        style={{ backdropFilter: 'blur(8px)' }}
-        onClick={onClose}
-      >
+    <ModalPortal>
+      <AnimatePresence>
         <motion.div
-          initial={{ y: 24, opacity: 0, scale: 0.98 }}
-          animate={{ y: 0, opacity: 1, scale: 1 }}
-          exit={{ y: 8, opacity: 0, scale: 0.98 }}
-          transition={{ duration: 0.22, ease: 'easeOut' }}
-          className="bg-white rounded-[2rem] shadow-2xl border-0 w-full max-w-2xl p-6"
-          onClick={(e) => e.stopPropagation()}
+          key="overlay"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-[2147483647] flex items-center justify-center p-4 md:p-8 bg-white/40 backdrop-blur-lg supports-[backdrop-filter]:bg-white/30"
+          style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
+          onClick={onClose}
         >
-          <div className="flex items-center justify-between">
-            <h3 className="text-xl font-bold">Assign Badge</h3>
-            <button
-              className="text-slate-500 hover:text-slate-700"
-              onClick={onClose}
-              aria-label="Close"
-            >
-              ✕
-            </button>
-          </div>
-
-          <div className="mt-1 text-sm text-slate-600">
-            Badge Code: <span className="font-mono">{badgeCode || '—'}</span>
-          </div>
-
-          <div className="mt-4">
-            <SearchInput
-              value={search}
-              onChange={setSearch}
-              placeholder="Search user by name, exact badge, or ID…"
-            />
-          </div>
-
-          <div className="mt-4 max-h-[50vh] overflow-y-auto divide-y divide-slate-200">
-            {filtered.length === 0 && (
-              <div className="py-10 text-center text-slate-500">No matches.</div>
-            )}
-
-            {filtered.map((u) => (
-              <div
-                key={u.id}
-                className="py-3 flex items-center justify-between gap-3"
+          <motion.div
+  key="card"
+  initial={{ y: 32, opacity: 0, scale: 0.985 }}
+  animate={{ y: 0, opacity: 1, scale: 1 }}
+  exit={{ y: 16, opacity: 0, scale: 0.985 }}
+  transition={{ duration: 0.22, ease: 'easeOut' }}
+  // ⬇️ CHANGED: flex + max height; no overall overflow
+  className="bg-white/90 backdrop-blur-md rounded-[2rem] shadow-2xl border border-slate-200
+             w-[min(92vw,40rem)] max-h-[85vh] p-6 flex flex-col"
+  onClick={(e) => e.stopPropagation()}
+>
+            <div className="flex items-center justify-between">
+              <h3 className="text-xl font-bold">Assign Badge</h3>
+              <button
+                className="text-slate-500 hover:text-slate-700"
+                onClick={onClose}
+                aria-label="Close"
               >
-                <div className="flex items-center gap-3">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={u.photoURL || '/default-avatar.png'}
-                    alt={u.fullName || u.name}
-                    className="w-10 h-10 rounded-full object-cover"
-                  />
-                  <div>
-                    <div className="font-semibold">{u.fullName || u.name}</div>
-                    <div className="text-xs text-slate-600">
-                      {u.roles?.length ? u.roles.join(', ') : 'Member'}
-                      {hasBadge(u) && (
-                        <span className="ml-2 text-emerald-600">• has badge</span>
-                      )}
+                ✕
+              </button>
+            </div>
+
+            <div className="mt-1 text-sm text-slate-600">
+              Badge Code: <span className="font-mono">{badgeCode || '—'}</span>
+            </div>
+
+            <div className="mt-4">
+              <SearchInput
+                value={search}
+                onChange={setSearch}
+                placeholder="Search user by name, exact badge, or ID…"
+              />
+            </div>
+
+            <div className="mt-4 max-h-[55vh] overflow-y-auto divide-y divide-slate-200">
+              {filtered.length === 0 && (
+                <div className="py-10 text-center text-slate-500">No matches.</div>
+              )}
+
+              {filtered.map((u) => (
+                <div
+                  key={u.id}
+                  className="py-2.5 px-1 flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={u.photoURL || '/default-avatar.png'}
+                      alt={u.fullName || u.name}
+                      className="w-9 h-9 rounded-full object-cover shrink-0 shadow-sm border border-white"
+                    />
+                    <div className="min-w-0">
+                      <div className="font-semibold truncate">{u.fullName || u.name}</div>
+                      <div className="text-[11px] text-slate-600 truncate">
+                        {u.roles?.length ? u.roles.join(', ') : 'Member'}
+                        {hasBadge(u) && (
+                          <span className="ml-2 text-emerald-600">• has badge</span>
+                        )}
+                      </div>
                     </div>
                   </div>
+                  <button
+                    className="rounded-full px-3 py-1.5 text-sm font-semibold bg-blue-500 text-white hover:bg-blue-600"
+                    onClick={() => onAssign(u)}
+                  >
+                    Assign
+                  </button>
                 </div>
-                <button
-                  className="rounded-full px-3 py-1.5 text-sm font-semibold bg-blue-500 text-white hover:bg-blue-600"
-                  onClick={() => onAssign(u)}
-                >
-                  Assign
-                </button>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
-            <div>
-              Tip: If the person is brand new, hit <Link href="/signup" className="text-blue-600 hover:underline">Signup</Link> and then assign.
+              ))}
             </div>
-            <button
-              className="rounded-full px-3 py-1.5 border border-slate-300 bg-white hover:bg-slate-50"
-              onClick={onClose}
-            >
-              Close
-            </button>
-          </div>
+
+            <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
+              <div>
+                Tip: If the person is brand new, hit <Link href="/signup" className="text-blue-600 hover:underline">Signup</Link> and then assign.
+              </div>
+              <button
+                className="rounded-full px-3 py-1.5 border border-slate-300 bg-white hover:bg-slate-50"
+                onClick={onClose}
+              >
+                Close
+              </button>
+            </div>
+          </motion.div>
         </motion.div>
-      </motion.div>
-    </AnimatePresence>
+      </AnimatePresence>
+    </ModalPortal>
   );
 }
