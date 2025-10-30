@@ -12,7 +12,7 @@ import {
   HandHelping,
   Search,
   CheckCircle2,
-  ArrowDownLeft,
+  ArrowDown,
   Info,
   Image as ImageIcon,
   MapPin,
@@ -39,9 +39,9 @@ import { useUser } from './context/UserContext';
 
 // —————————————————————————————————————————————
 // Helpers
-const digitsOnly = (s) => (s.match(/\d+/g)?.join('') ?? '');
-const clamp5 = (s) => digitsOnly(s).slice(0, 5);
-const normalize = (s) =>
+const digitsOnly = (s: string) => (s.match(/\d+/g)?.join('') ?? '');
+const clamp5 = (s: string) => digitsOnly(s).slice(0, 5);
+const normalize = (s: string) =>
   String(s || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -73,7 +73,9 @@ export default function NovaPublicHome() {
   // Greeting / time
   const [greeting, setGreeting] = useState('');
   const [now, setNow] = useState(new Date());
-  const [phrase, setPhrase] = useState(phrases[Math.floor(Math.random() * phrases.length)]);
+  const [phrase, setPhrase] = useState(
+    phrases[Math.floor(Math.random() * phrases.length)]
+  );
 
   // Scanner buffer
   const [buf, setBuf] = useState('');
@@ -83,15 +85,15 @@ export default function NovaPublicHome() {
   // Relink flow state
   const [showRelinkModal, setShowRelinkModal] = useState(false);
   const [pendingBadgeCode, setPendingBadgeCode] = useState('');
-  const [pendingScanId, setPendingScanId] = useState(null); // id of the not_found/error scan
+  the const [pendingScanId, setPendingScanId] = useState<string | null>(null);
   const [dismissIn, setDismissIn] = useState(7);
 
   // Self-serve wizard
   const [showWizard, setShowWizard] = useState(false);
   const [nameQuery, setNameQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
-  const [results, setResults] = useState([]);
-  const [selectedUser, setSelectedUser] = useState(null);
+  const [results, setResults] = useState<any[]>([]);
+  const [selectedUser, setSelectedUser] = useState<any | null>(null);
   const [linking, setLinking] = useState(false);
   const [linkDone, setLinkDone] = useState(false);
 
@@ -107,8 +109,9 @@ export default function NovaPublicHome() {
   // Time / Greeting
   useEffect(() => {
     const updateTime = () => {
-      setNow(new Date());
-      const hour = new Date().getHours();
+      const d = new Date();
+      setNow(d);
+      const hour = d.getHours();
       if (hour < 12) setGreeting('Good Morning');
       else if (hour < 18) setGreeting('Good Afternoon');
       else setGreeting('Good Evening');
@@ -120,11 +123,11 @@ export default function NovaPublicHome() {
 
   // Global key buffer
   useEffect(() => {
-    const onKey = (e) => {
+    const onKey = (e: KeyboardEvent) => {
       // pause live scanning while dialogs are active
       if (showRelinkModal || showWizard) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      const k = e.key ?? '';
+      const k = (e.key ?? '');
       if (/\d/.test(k)) {
         setIsReading(true);
         setBuf((prev) => clamp5(prev + k));
@@ -171,7 +174,7 @@ export default function NovaPublicHome() {
     audio.play().catch(() => {});
   };
 
-  async function commitScan(code) {
+  async function commitScan(code: string) {
     setIsReading(false);
     playScanSound();
     await handleScan(code);
@@ -185,7 +188,7 @@ export default function NovaPublicHome() {
   // —————————————————————————————————————————————
   // MAIN SCAN HANDLER
   // —————————————————————————————————————————————
-  const handleScan = async (code) => {
+  const handleScan = async (code: string) => {
     try {
       const badgeCode = clamp5(code);
       if (badgeCode.length !== 5) return;
@@ -196,7 +199,7 @@ export default function NovaPublicHome() {
 
       // Try multiple fields + types
       const fields = ['badge.id', 'badge.badgeNumber'];
-      let hit = null;
+      let hit: any = null;
 
       for (const field of fields) {
         for (const val of [asString, asNumber]) {
@@ -251,7 +254,7 @@ export default function NovaPublicHome() {
       localStorage.setItem('nova-user', JSON.stringify(scanned));
       setCurrentUser(scanned);
       router.replace('/checkin');
-    } catch (err) {
+    } catch (err: any) {
       console.error('Scan lookup error:', err);
       try {
         const ref = await addDoc(collection(db, 'scans'), {
@@ -307,7 +310,6 @@ export default function NovaPublicHome() {
     if (helpNotified || helpNotifying) return;
     setHelpNotifying(true);
     try {
-      // mark the original scan with the choice
       if (pendingScanId) {
         await updateDoc(doc(db, 'scans', pendingScanId), {
           flowChoice: 'help',
@@ -315,7 +317,6 @@ export default function NovaPublicHome() {
           status: 'relink_help_requested',
         });
       }
-      // create an assistance request document
       await addDoc(collection(db, 'assistanceRequests'), {
         type: 'badge_relink',
         kioskId,
@@ -352,8 +353,7 @@ export default function NovaPublicHome() {
   };
 
   const allUsersIndexed = useMemo(() => {
-    // Prepare a lightweight index for fast client search
-    return (allUsers || []).map((u) => ({
+    return (allUsers || []).map((u: any) => ({
       id: u.id,
       name: u.fullName || u.name || '',
       nameNorm: normalize(u.fullName || u.name || ''),
@@ -376,20 +376,17 @@ export default function NovaPublicHome() {
       }
 
       // Match on name/email contains; prefer word-starts
-      const starts = [];
-      const contains = [];
+      const starts: any[] = [];
+      const contains: any[] = [];
       for (const u of allUsersIndexed) {
         if (!u.nameNorm && !u.emailNorm) continue;
-        const nameStarts = u.nameNorm.split(' ').some((w) => w.startsWith(q));
+        const nameStarts = u.nameNorm.split(' ').some((w: string) => w.startsWith(q));
         const emailStarts = u.emailNorm.startsWith(q);
         const nameContains = u.nameNorm.includes(q);
         const emailContains = u.emailNorm.includes(q);
 
-        if (nameStarts || emailStarts) {
-          starts.push(u);
-        } else if (nameContains || emailContains) {
-          contains.push(u);
-        }
+        if (nameStarts || emailStarts) starts.push(u);
+        else if (nameContains || emailContains) contains.push(u);
       }
 
       const merged = [...starts, ...contains].slice(0, 20);
@@ -460,211 +457,170 @@ export default function NovaPublicHome() {
   // —————————————————————————————————————————————
   return (
     <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white text-slate-900">
-      {/* For this page we tuck CornerUtilities into top-right to avoid clutter */}
+      {/* Corner utilities moved top-right for this page */}
       <div className="fixed top-3 right-3 z-[30] opacity-90">
         <CornerUtilities />
       </div>
 
-      {/* Top header bar */}
-      <div className="pointer-events-none select-none w-full px-6 pt-6">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <Image src="/Logo.svg" alt="GoCreate Nova" width={44} height={44} priority />
-            <div>
-              <div className="text-2xl font-bold">{greeting}</div>
-              <div className="text-sm text-slate-500">{phrase}</div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-4 text-sm text-slate-600">
-            <div className="flex items-center gap-1">
-              <CalendarDays className="w-4 h-4" />
-              <span>{formatDate(now)}</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <Clock className="w-4 h-4" />
-              <span>{formatTime(now)}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
       {/* Split layout */}
-      <div className="max-w-7xl mx-auto px-6 pb-10 pt-8 md:pt-10">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-stretch">
-          {/* LEFT: Scanner zone */}
-          <div className="relative rounded-[2rem] border border-slate-200 bg-white/60 backdrop-blur-md shadow-lg overflow-hidden min-h-[520px]">
-            {/* Soft gradient wash */}
-            <div className="absolute inset-0 bg-gradient-to-br from-sky-50 via-white/60 to-indigo-50 pointer-events-none" />
-
-            {/* Instructional copy */}
-            <div className="relative p-8 md:p-10">
-              <div className="max-w-md">
-                <h1 className="text-3xl md:text-4xl font-bold tracking-tight">
-                  Place your badge on the scanner
-                </h1>
-                <p className="mt-2 text-slate-600">
-                  Hold your card steady for a second. You&apos;ll hear a chime and we&apos;ll do the rest.
-                </p>
-              </div>
+      <div className="max-w-7xl mx-auto px-6 pb-10 pt-8 md:pt-10 grid grid-cols-1 lg:grid-cols-2 gap-8 items-stretch">
+        {/* LEFT: Full-bleed scanner zone (no card chrome) */}
+        <section className="relative rounded-[2rem] overflow-hidden min-h-[560px] border border-slate-200 bg-gradient-to-b from-white/70 via-sky-50/60 to-white">
+          {/* Header copy */}
+          <div className="p-8 md:p-10">
+            <div className="flex items-center gap-3 mb-2">
+              <Image src="/Logo.svg" alt="GoCreate Nova" width={40} height={40} priority />
+              <div className="text-2xl font-bold">{greeting}</div>
             </div>
+            <p className="text-slate-500 text-sm">{phrase}</p>
 
-            {/* Animated arrow & cue, positioned at 25% screen width */}
-            <div className="pointer-events-none absolute left-0 right-0" style={{ bottom: 210 }}>
-              <div className="relative w-full">
-                {/* We anchor arrow ~25% across the viewport: */}
-                <div className="absolute" style={{ left: 'calc(25% - 40px)' }}>
-                  <motion.div
-                    initial={{ y: 0, rotate: -18 }}
-                    animate={{ y: [0, -12, 0] }}
-                    transition={{ repeat: Infinity, duration: 1.8, ease: 'easeInOut' }}
-                    className="flex items-center gap-3"
-                  >
-                    <ArrowDownLeft className="w-10 h-10 text-blue-600 drop-shadow" strokeWidth={2} />
-                    <div className="bg-white/90 backdrop-blur rounded-xl px-3 py-1.5 border border-slate-200 text-sm font-medium shadow">
-                      Scan here
-                    </div>
-                  </motion.div>
-                </div>
-              </div>
+            <div className="mt-6 max-w-xl">
+              <h1 className="text-3xl md:text-4xl font-bold tracking-tight">
+                Place your badge on the scanner
+              </h1>
+              <p className="mt-2 text-slate-600">
+                Hold your card steady for a second. You&apos;ll hear a chime and we&apos;ll do the rest.
+              </p>
             </div>
+          </div>
 
-            {/* The angled scanner pad */}
-            {/*
-              Pad is 220x220. Center X should be at 25% of full width → left: calc(25% - 110px)
-            */}
-            <div
-              className="absolute"
-              style={{ left: 'calc(25% - 110px)', bottom: 0 }}
-            >
-              <motion.div
-                initial={{ y: 140, opacity: 0.9 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ type: 'spring', stiffness: 140, damping: 18 }}
-                className="relative"
-              >
-                <div
-                  className="rounded-3xl border border-slate-200 bg-white shadow-2xl"
-                  style={{
-                    width: 220,
-                    height: 220,
-                    transform: 'rotate(-12deg) translateY(24px)',
-                    transformOrigin: 'center',
-                  }}
+          {/* Single time + date lives here? No — we show it on the right card only to avoid duplication */}
+
+          {/* Bouncing arrow & cue near bottom; anchored at 25% of container width */}
+          <div className="pointer-events-none absolute inset-x-0" style={{ bottom: 120 }}>
+            <div className="relative w-full">
+              <div className="absolute" style={{ left: 'calc(25% - 16px)' }}>
+                <motion.div
+                  initial={{ y: 0 }}
+                  animate={{ y: [0, 14, 0] }}
+                  transition={{ repeat: Infinity, duration: 1.6, ease: 'easeInOut' }}
+                  className="flex flex-col items-center"
                 >
-                  {/* Subtle animated scan line */}
-                  <motion.div
-                    aria-hidden
-                    className="absolute inset-x-6 top-10 h-[3px] rounded-full"
-                    animate={{ opacity: [0.2, 0.8, 0.2] }}
-                    transition={{ repeat: Infinity, duration: 2.2, ease: 'easeInOut' }}
-                    style={{
-                      background:
-                        'radial-gradient(50% 50% at 50% 50%, rgba(37,99,235,0.6) 0%, rgba(37,99,235,0.0) 100%)',
-                    }}
-                  />
-                  {/* Big scan glyph in center */}
-                  <div className="absolute inset-0 grid place-items-center">
-                    <motion.div
-                      animate={{ scale: isReading ? [1, 1.06, 1] : 1 }}
-                      transition={{ repeat: isReading ? Infinity : 0, duration: 1.6, ease: 'easeInOut' }}
-                    >
-                      <ScanLine className="text-slate-700" style={{ width: 72, height: 72 }} strokeWidth={1.8} />
-                    </motion.div>
+                  <div className="rounded-full bg-blue-600/90 text-white shadow-lg px-3 py-1 text-sm font-semibold mb-2">
+                    Scan here
                   </div>
-                </div>
-              </motion.div>
-            </div>
-
-            {/* Live status pill */}
-            <div className="absolute left-6 bottom-6">
-              <div className="flex items-center gap-2 rounded-full bg-white/90 backdrop-blur px-3 py-1.5 border border-slate-200 shadow">
-                <div
-                  className={`w-2.5 h-2.5 rounded-full ${
-                    isReading ? 'bg-green-500' : 'bg-slate-300'
-                  }`}
-                />
-                <span className="text-sm font-medium">{isReading ? 'Reading...' : 'Ready'}</span>
-                {buf && <span className="text-xs px-2 py-0.5 rounded bg-slate-100 border border-slate-200">{buf}</span>}
+                  <ArrowDown className="w-10 h-10 text-blue-600 drop-shadow" strokeWidth={2.2} />
+                </motion.div>
               </div>
             </div>
           </div>
 
-          {/* RIGHT: Mini dashboard */}
-          <div className="flex flex-col gap-6">
-            {/* Welcome panel */}
-            <div className="rounded-[2rem] border border-slate-200 bg-white/60 backdrop-blur-md shadow-lg p-6">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm text-slate-500">{formatDate(now)}</div>
-                  <div className="text-2xl font-bold leading-tight">Welcome to GoCreate</div>
-                  <div className="text-slate-600 mt-1">
-                    Scan to check in — or explore while you&apos;re here.
-                  </div>
-                </div>
-                <div className="hidden md:block">
-                  <div className="rounded-2xl px-4 py-2 bg-slate-900 text-white text-sm font-semibold shadow">
-                    {formatTime(now)}
-                  </div>
-                </div>
-              </div>
-            </div>
+          {/* Invisible pad hit-area (lets you click to commit buffer during dev) */}
+          <button
+            onClick={clickToTest}
+            aria-label="Test commit scan"
+            className="absolute"
+            style={{
+              left: 'calc(25% - 110px)',
+              bottom: 10,
+              width: 220,
+              height: 100,
+              background: 'transparent',
+            }}
+          />
 
-            {/* 2x2 quick grid */}
-            <div className="grid grid-cols-2 gap-5">
-              <DashCard
-                title="About"
-                subtitle="How it works, safety, studios"
-                href="/about"
-                icon={<Info className="w-6 h-6" />}
+          {/* Live status pill */}
+          <div className="absolute left-6 bottom-6">
+            <div className="flex items-center gap-2 rounded-full bg-white/90 backdrop-blur px-3 py-1.5 border border-slate-200 shadow">
+              <div
+                className={`w-2.5 h-2.5 rounded-full ${
+                  isReading ? 'bg-green-500' : 'bg-slate-300'
+                }`}
               />
-              <DashCard
-                title="Gallery"
-                subtitle="See projects our members made"
-                href="/gallery"
-                icon={<ImageIcon className="w-6 h-6" />}
-              />
-              <DashCard
-                title="Map"
-                subtitle="Find studios & front desk"
-                href="/map"
-                icon={<MapPin className="w-6 h-6" />}
-              />
-              <DashCard
-                title="What’s New"
-                subtitle="Classes, events, announcements"
-                href="/discover"
-                icon={<Sparkles className="w-6 h-6" />}
-              />
-            </div>
-
-            {/* New member CTA */}
-            <Link
-              href="/signup"
-              className="group w-full rounded-[1.4rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-xl focus:outline-none focus:ring-4 focus:ring-blue-200"
-            >
-              <div className="w-full h-16 rounded-[1.25rem] bg-white/85 backdrop-blur grid place-items-center">
-                <div className="flex items-center gap-2 font-semibold text-blue-700 group-hover:text-blue-800">
-                  <UserPlus className="h-5 w-5" />
-                  <span>I’m new to GoCreate</span>
-                </div>
-              </div>
-            </Link>
-
-            {/* Tiny helper note */}
-            <div className="text-xs text-slate-500 text-center">
-              Prefer help? The front desk is happy to assist with anything.
+              <span className="text-sm font-medium">{isReading ? 'Reading…' : 'Ready'}</span>
+              {buf && (
+                <span className="text-xs px-2 py-0.5 rounded bg-slate-100 border border-slate-200">
+                  {buf}
+                </span>
+              )}
             </div>
           </div>
-        </div>
+        </section>
+
+        {/* RIGHT: Mini dashboard */}
+        <aside className="flex flex-col gap-6">
+          {/* Welcome panel with single date/time */}
+          <div className="rounded-[2rem] border border-slate-200 bg-white/70 backdrop-blur-md shadow-lg p-6">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm text-slate-500 flex items-center gap-2">
+                  <CalendarDays className="w-4 h-4" />
+                  <span>{formatDate(now)}</span>
+                </div>
+                <div className="text-2xl font-bold leading-tight mt-1">Welcome to GoCreate</div>
+                <div className="text-slate-600 mt-1">
+                  Scan to check in — or explore while you&apos;re here.
+                </div>
+              </div>
+              <div className="hidden md:block">
+                <div className="rounded-2xl px-4 py-2 bg-slate-900 text-white text-sm font-semibold shadow flex items-center gap-2">
+                  <Clock className="w-4 h-4" />
+                  {formatTime(now)}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Quick actions header */}
+          <div className="px-1 text-sm font-semibold tracking-wide text-slate-500 uppercase">
+            Quick Actions
+          </div>
+
+          {/* 2x2 quick grid with tasteful color accents */}
+          <div className="grid grid-cols-2 gap-5">
+            <DashCard
+              title="About"
+              subtitle="How it works, safety, studios"
+              href="/about"
+              icon={<Info className="w-6 h-6 text-blue-600" />}
+              accent="from-blue-50 to-white"
+              textClass="text-blue-700"
+            />
+            <DashCard
+              title="Gallery"
+              subtitle="See projects members made"
+              href="/gallery"
+              icon={<ImageIcon className="w-6 h-6 text-pink-600" />}
+              accent="from-pink-50 to-white"
+              textClass="text-pink-700"
+            />
+            <DashCard
+              title="Map"
+              subtitle="Find studios & front desk"
+              href="/map"
+              icon={<MapPin className="w-6 h-6 text-emerald-600" />}
+              accent="from-emerald-50 to-white"
+              textClass="text-emerald-700"
+            />
+            <DashCard
+              title="What’s New"
+              subtitle="Classes, events, announcements"
+              href="/discover"
+              icon={<Sparkles className="w-6 h-6 text-amber-600" />}
+              accent="from-amber-50 to-white"
+              textClass="text-amber-700"
+            />
+          </div>
+
+          {/* New member CTA */}
+          <Link
+            href="/signup"
+            className="group w-full rounded-[1.4rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-xl focus:outline-none focus:ring-4 focus:ring-blue-200"
+          >
+            <div className="w-full h-16 rounded-[1.25rem] bg-white/85 backdrop-blur grid place-items-center">
+              <div className="flex items-center gap-2 font-semibold text-blue-700 group-hover:text-blue-800">
+                <UserPlus className="h-5 w-5" />
+                <span>I’m new to GoCreate</span>
+              </div>
+            </div>
+          </Link>
+
+          {/* Tiny helper note */}
+          <div className="text-xs text-slate-500 text-center">
+            Prefer help? The front desk is happy to assist with anything.
+          </div>
+        </aside>
       </div>
-
-      {/* Invisible click tester for dev (click the pad area to commit buffer) */}
-      <button
-        onClick={clickToTest}
-        className="sr-only"
-        aria-label="Test commit scan"
-      />
 
       {/* Relink / Assistance modal */}
       <AnimatePresence>
@@ -696,12 +652,12 @@ export default function NovaPublicHome() {
 
               <h2 className="text-2xl font-bold text-slate-900">Hey there!</h2>
               <p className="text-base leading-relaxed text-slate-600 max-w-md mx-auto">
-                I see you have a membership with us. We’re taking your experience to the next level — part of that
-                requires us to <span className="font-semibold">re-link your badge</span> with your membership. It’s super
-                easy. I can walk you through it, or you can get help from our front desk. What would you like?
+                I see you have a membership with us. We’re taking your experience to the next
+                level — part of that requires us to <span className="font-semibold">re-link your badge</span> with your
+                membership. It’s super easy. I can walk you through it, or you can get help
+                from our front desk. What would you like?
               </p>
 
-              {/* Actions */}
               <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
                 <button
                   onClick={openWizard}
@@ -734,7 +690,7 @@ export default function NovaPublicHome() {
         )}
       </AnimatePresence>
 
-      {/* Self-serve: Assign Badge Wizard (client-side search via UserContext) */}
+      {/* Self-serve: Assign Badge Wizard */}
       <AnimatePresence>
         {showWizard && (
           <motion.div
@@ -859,18 +815,32 @@ export default function NovaPublicHome() {
 // —————————————————————————————————————————————
 // Small card for the mini dashboard grid
 // —————————————————————————————————————————————
-function DashCard({ title, subtitle, href, icon }) {
+function DashCard({
+  title,
+  subtitle,
+  href,
+  icon,
+  accent = 'from-slate-50 to-white',
+  textClass = 'text-slate-700',
+}: {
+  title: string;
+  subtitle: string;
+  href: string;
+  icon: React.ReactNode;
+  accent?: string;
+  textClass?: string;
+}) {
   return (
     <Link
       href={href}
-      className="group rounded-2xl border border-slate-200 bg-white/60 backdrop-blur hover:bg-white/80 transition-colors shadow-md p-4 focus:outline-none focus:ring-4 focus:ring-blue-100"
+      className={`group rounded-2xl border border-slate-200 bg-gradient-to-b ${accent} backdrop-blur hover:bg-white/80 transition-colors shadow-md p-4 focus:outline-none focus:ring-4 focus:ring-blue-100`}
     >
       <div className="flex items-start gap-3">
         <div className="rounded-xl border border-slate-200 bg-white p-2 shadow-sm group-hover:shadow">
-          <div className="text-slate-700">{icon}</div>
+          {icon}
         </div>
         <div className="min-w-0">
-          <div className="font-semibold text-slate-900">{title}</div>
+          <div className={`font-semibold ${textClass}`}>{title}</div>
           <div className="text-xs text-slate-600 mt-0.5 line-clamp-2">{subtitle}</div>
         </div>
       </div>
