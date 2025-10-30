@@ -39,9 +39,9 @@ import { useUser } from './context/UserContext';
 
 // —————————————————————————————————————————————
 // Helpers
-const digitsOnly = (s: string) => (s.match(/\d+/g)?.join('') ?? '');
-const clamp5 = (s: string) => digitsOnly(s).slice(0, 5);
-const normalize = (s: string) =>
+const digitsOnly = (s) => (s.match(/\d+/g)?.join('') ?? '');
+const clamp5 = (s) => digitsOnly(s).slice(0, 5);
+const normalize = (s) =>
   String(s || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -85,15 +85,15 @@ export default function NovaPublicHome() {
   // Relink flow state
   const [showRelinkModal, setShowRelinkModal] = useState(false);
   const [pendingBadgeCode, setPendingBadgeCode] = useState('');
-  the const [pendingScanId, setPendingScanId] = useState<string | null>(null);
+  const [pendingScanId, setPendingScanId] = useState(null);
   const [dismissIn, setDismissIn] = useState(7);
 
   // Self-serve wizard
   const [showWizard, setShowWizard] = useState(false);
   const [nameQuery, setNameQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
-  const [results, setResults] = useState<any[]>([]);
-  const [selectedUser, setSelectedUser] = useState<any | null>(null);
+  const [results, setResults] = useState([]);
+  const [selectedUser, setSelectedUser] = useState(null);
   const [linking, setLinking] = useState(false);
   const [linkDone, setLinkDone] = useState(false);
 
@@ -123,7 +123,7 @@ export default function NovaPublicHome() {
 
   // Global key buffer
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    const onKey = (e) => {
       // pause live scanning while dialogs are active
       if (showRelinkModal || showWizard) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -174,7 +174,7 @@ export default function NovaPublicHome() {
     audio.play().catch(() => {});
   };
 
-  async function commitScan(code: string) {
+  async function commitScan(code) {
     setIsReading(false);
     playScanSound();
     await handleScan(code);
@@ -188,7 +188,7 @@ export default function NovaPublicHome() {
   // —————————————————————————————————————————————
   // MAIN SCAN HANDLER
   // —————————————————————————————————————————————
-  const handleScan = async (code: string) => {
+  const handleScan = async (code) => {
     try {
       const badgeCode = clamp5(code);
       if (badgeCode.length !== 5) return;
@@ -199,7 +199,7 @@ export default function NovaPublicHome() {
 
       // Try multiple fields + types
       const fields = ['badge.id', 'badge.badgeNumber'];
-      let hit: any = null;
+      let hit = null;
 
       for (const field of fields) {
         for (const val of [asString, asNumber]) {
@@ -254,7 +254,7 @@ export default function NovaPublicHome() {
       localStorage.setItem('nova-user', JSON.stringify(scanned));
       setCurrentUser(scanned);
       router.replace('/checkin');
-    } catch (err: any) {
+    } catch (erry) {
       console.error('Scan lookup error:', err);
       try {
         const ref = await addDoc(collection(db, 'scans'), {
@@ -353,7 +353,7 @@ export default function NovaPublicHome() {
   };
 
   const allUsersIndexed = useMemo(() => {
-    return (allUsers || []).map((u: any) => ({
+    return (allUsers || []).map((u) => ({
       id: u.id,
       name: u.fullName || u.name || '',
       nameNorm: normalize(u.fullName || u.name || ''),
@@ -376,11 +376,11 @@ export default function NovaPublicHome() {
       }
 
       // Match on name/email contains; prefer word-starts
-      const starts: any[] = [];
-      const contains: any[] = [];
+      const starts= [];
+      const contains = [];
       for (const u of allUsersIndexed) {
         if (!u.nameNorm && !u.emailNorm) continue;
-        const nameStarts = u.nameNorm.split(' ').some((w: string) => w.startsWith(q));
+        const nameStarts = u.nameNorm.split(' ').some((w) => w.startsWith(q));
         const emailStarts = u.emailNorm.startsWith(q);
         const nameContains = u.nameNorm.includes(q);
         const emailContains = u.emailNorm.includes(q);
@@ -821,15 +821,7 @@ function DashCard({
   href,
   icon,
   accent = 'from-slate-50 to-white',
-  textClass = 'text-slate-700',
-}: {
-  title: string;
-  subtitle: string;
-  href: string;
-  icon: React.ReactNode;
-  accent?: string;
-  textClass?: string;
-}) {
+  textClass = 'text-slate-700',}) {
   return (
     <Link
       href={href}
