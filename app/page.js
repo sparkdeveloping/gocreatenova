@@ -12,6 +12,13 @@ import {
   HandHelping,
   Search,
   CheckCircle2,
+  ArrowDownLeft,
+  Info,
+  Image as ImageIcon,
+  MapPin,
+  Sparkles,
+  Clock,
+  CalendarDays,
 } from 'lucide-react';
 import {
   getFirestore,
@@ -40,6 +47,19 @@ const normalize = (s) =>
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 
+const formatTime = (d = new Date()) =>
+  d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const formatDate = (d = new Date()) =>
+  d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+
+const phrases = [
+  'Create boldly. Be kind.',
+  'Safety first. Curiosity always.',
+  'Tiny iterations, massive outcomes.',
+  'We cheer for your first draft.',
+  'Today’s a great day to make.',
+];
+
 // —————————————————————————————————————————————
 
 export default function NovaPublicHome() {
@@ -50,8 +70,10 @@ export default function NovaPublicHome() {
   // Kiosk identity (stable)
   const kioskId = 'front-desk-1';
 
-  // Greeting
+  // Greeting / time
   const [greeting, setGreeting] = useState('');
+  const [now, setNow] = useState(new Date());
+  const [phrase, setPhrase] = useState(phrases[Math.floor(Math.random() * phrases.length)]);
 
   // Scanner buffer
   const [buf, setBuf] = useState('');
@@ -85,13 +107,14 @@ export default function NovaPublicHome() {
   // Time / Greeting
   useEffect(() => {
     const updateTime = () => {
+      setNow(new Date());
       const hour = new Date().getHours();
       if (hour < 12) setGreeting('Good Morning');
       else if (hour < 18) setGreeting('Good Afternoon');
       else setGreeting('Good Evening');
     };
     updateTime();
-    const id = setInterval(updateTime, 60_000);
+    const id = setInterval(updateTime, 30_000);
     return () => clearInterval(id);
   }, []);
 
@@ -436,77 +459,212 @@ export default function NovaPublicHome() {
   // UI
   // —————————————————————————————————————————————
   return (
-    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white flex flex-col items-center justify-center text-slate-900">
-      <CornerUtilities />
+    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white text-slate-900">
+      {/* For this page we tuck CornerUtilities into top-right to avoid clutter */}
+      <div className="fixed top-3 right-3 z-[30] opacity-90">
+        <CornerUtilities />
+      </div>
 
-      {/* Main card */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.8, ease: 'easeOut' }}
-        className="relative backdrop-blur-md bg-white/50 border border-slate-200 rounded-[2rem] shadow-xl w-[90%] max-w-3xl p-10 flex flex-col items-center"
-      >
-        <Image src="/Logo.svg" alt="GoCreate Nova Logo" width={120} height={120} priority />
-        <h1 className="text-2xl md:text-3xl font-bold text-center mt-4">{greeting}</h1>
-
-        {/* Scan headline + icon */}
-        <div
-          onClick={clickToTest}
-          className="flex flex-col items-center gap-4 mt-6 cursor-pointer group select-none"
-        >
-          <div className="text-lg md:text-xl font-medium text-slate-800 transition">
-            Scan your badge to begin
-          </div>
-
-          <div className="relative grid place-items-center mt-2">
-            <motion.span
-              aria-hidden
-              className="absolute rounded-full"
-              style={{ width: 150, height: 150 }}
-              animate={{
-                boxShadow: [
-                  '0 0 0 0 rgba(37,99,235,0)',
-                  '0 0 0 16px rgba(37,99,235,0.12)',
-                  '0 0 0 0 rgba(37,99,235,0)',
-                ],
-              }}
-              transition={{ repeat: isReading ? Infinity : 0, duration: 1.7, ease: 'easeInOut' }}
-            />
-            <motion.div
-              animate={{ scale: [1, 1.06, 1] }}
-              transition={{ repeat: Infinity, duration: 1.8, ease: 'easeInOut' }}
-              className={isReading ? 'opacity-85' : ''}
-            >
-              <ScanLine className="block text-slate-700 transition" style={{ width: 96, height: 96 }} strokeWidth={1.8} />
-            </motion.div>
-          </div>
-        </div>
-
-        {/* Divider */}
-        <div className="relative w-full max-w-xs mt-8 mb-8">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-slate-200" />
-          </div>
-          <div className="relative flex justify-center">
-            <span className="px-4 bg-white text-slate-400 text-sm font-medium tracking-wide">
-              OR
-            </span>
-          </div>
-        </div>
-
-        {/* Prominent new member CTA */}
-        <Link
-          href="/signup"
-          className="group w-full max-w-sm rounded-[1.25rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-lg"
-        >
-          <div className="w-full h-14 rounded-[1.15rem] bg-white/80 backdrop-blur-sm grid place-items-center">
-            <div className="flex items-center gap-2 font-semibold text-blue-700 group-hover:text-blue-800">
-              <UserPlus className="h-5 w-5" />
-              <span>I’m new to GoCreate</span>
+      {/* Top header bar */}
+      <div className="pointer-events-none select-none w-full px-6 pt-6">
+        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Image src="/Logo.svg" alt="GoCreate Nova" width={44} height={44} priority />
+            <div>
+              <div className="text-2xl font-bold">{greeting}</div>
+              <div className="text-sm text-slate-500">{phrase}</div>
             </div>
           </div>
-        </Link>
-      </motion.div>
+
+          <div className="flex items-center gap-4 text-sm text-slate-600">
+            <div className="flex items-center gap-1">
+              <CalendarDays className="w-4 h-4" />
+              <span>{formatDate(now)}</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <Clock className="w-4 h-4" />
+              <span>{formatTime(now)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Split layout */}
+      <div className="max-w-7xl mx-auto px-6 pb-10 pt-8 md:pt-10">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-stretch">
+          {/* LEFT: Scanner zone */}
+          <div className="relative rounded-[2rem] border border-slate-200 bg-white/60 backdrop-blur-md shadow-lg overflow-hidden min-h-[520px]">
+            {/* Soft gradient wash */}
+            <div className="absolute inset-0 bg-gradient-to-br from-sky-50 via-white/60 to-indigo-50 pointer-events-none" />
+
+            {/* Instructional copy */}
+            <div className="relative p-8 md:p-10">
+              <div className="max-w-md">
+                <h1 className="text-3xl md:text-4xl font-bold tracking-tight">
+                  Place your badge on the scanner
+                </h1>
+                <p className="mt-2 text-slate-600">
+                  Hold your card steady for a second. You&apos;ll hear a chime and we&apos;ll do the rest.
+                </p>
+              </div>
+            </div>
+
+            {/* Animated arrow & cue, positioned at 25% screen width */}
+            <div className="pointer-events-none absolute left-0 right-0" style={{ bottom: 210 }}>
+              <div className="relative w-full">
+                {/* We anchor arrow ~25% across the viewport: */}
+                <div className="absolute" style={{ left: 'calc(25% - 40px)' }}>
+                  <motion.div
+                    initial={{ y: 0, rotate: -18 }}
+                    animate={{ y: [0, -12, 0] }}
+                    transition={{ repeat: Infinity, duration: 1.8, ease: 'easeInOut' }}
+                    className="flex items-center gap-3"
+                  >
+                    <ArrowDownLeft className="w-10 h-10 text-blue-600 drop-shadow" strokeWidth={2} />
+                    <div className="bg-white/90 backdrop-blur rounded-xl px-3 py-1.5 border border-slate-200 text-sm font-medium shadow">
+                      Scan here
+                    </div>
+                  </motion.div>
+                </div>
+              </div>
+            </div>
+
+            {/* The angled scanner pad */}
+            {/*
+              Pad is 220x220. Center X should be at 25% of full width → left: calc(25% - 110px)
+            */}
+            <div
+              className="absolute"
+              style={{ left: 'calc(25% - 110px)', bottom: 0 }}
+            >
+              <motion.div
+                initial={{ y: 140, opacity: 0.9 }}
+                animate={{ y: 0, opacity: 1 }}
+                transition={{ type: 'spring', stiffness: 140, damping: 18 }}
+                className="relative"
+              >
+                <div
+                  className="rounded-3xl border border-slate-200 bg-white shadow-2xl"
+                  style={{
+                    width: 220,
+                    height: 220,
+                    transform: 'rotate(-12deg) translateY(24px)',
+                    transformOrigin: 'center',
+                  }}
+                >
+                  {/* Subtle animated scan line */}
+                  <motion.div
+                    aria-hidden
+                    className="absolute inset-x-6 top-10 h-[3px] rounded-full"
+                    animate={{ opacity: [0.2, 0.8, 0.2] }}
+                    transition={{ repeat: Infinity, duration: 2.2, ease: 'easeInOut' }}
+                    style={{
+                      background:
+                        'radial-gradient(50% 50% at 50% 50%, rgba(37,99,235,0.6) 0%, rgba(37,99,235,0.0) 100%)',
+                    }}
+                  />
+                  {/* Big scan glyph in center */}
+                  <div className="absolute inset-0 grid place-items-center">
+                    <motion.div
+                      animate={{ scale: isReading ? [1, 1.06, 1] : 1 }}
+                      transition={{ repeat: isReading ? Infinity : 0, duration: 1.6, ease: 'easeInOut' }}
+                    >
+                      <ScanLine className="text-slate-700" style={{ width: 72, height: 72 }} strokeWidth={1.8} />
+                    </motion.div>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+
+            {/* Live status pill */}
+            <div className="absolute left-6 bottom-6">
+              <div className="flex items-center gap-2 rounded-full bg-white/90 backdrop-blur px-3 py-1.5 border border-slate-200 shadow">
+                <div
+                  className={`w-2.5 h-2.5 rounded-full ${
+                    isReading ? 'bg-green-500' : 'bg-slate-300'
+                  }`}
+                />
+                <span className="text-sm font-medium">{isReading ? 'Reading...' : 'Ready'}</span>
+                {buf && <span className="text-xs px-2 py-0.5 rounded bg-slate-100 border border-slate-200">{buf}</span>}
+              </div>
+            </div>
+          </div>
+
+          {/* RIGHT: Mini dashboard */}
+          <div className="flex flex-col gap-6">
+            {/* Welcome panel */}
+            <div className="rounded-[2rem] border border-slate-200 bg-white/60 backdrop-blur-md shadow-lg p-6">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm text-slate-500">{formatDate(now)}</div>
+                  <div className="text-2xl font-bold leading-tight">Welcome to GoCreate</div>
+                  <div className="text-slate-600 mt-1">
+                    Scan to check in — or explore while you&apos;re here.
+                  </div>
+                </div>
+                <div className="hidden md:block">
+                  <div className="rounded-2xl px-4 py-2 bg-slate-900 text-white text-sm font-semibold shadow">
+                    {formatTime(now)}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 2x2 quick grid */}
+            <div className="grid grid-cols-2 gap-5">
+              <DashCard
+                title="About"
+                subtitle="How it works, safety, studios"
+                href="/about"
+                icon={<Info className="w-6 h-6" />}
+              />
+              <DashCard
+                title="Gallery"
+                subtitle="See projects our members made"
+                href="/gallery"
+                icon={<ImageIcon className="w-6 h-6" />}
+              />
+              <DashCard
+                title="Map"
+                subtitle="Find studios & front desk"
+                href="/map"
+                icon={<MapPin className="w-6 h-6" />}
+              />
+              <DashCard
+                title="What’s New"
+                subtitle="Classes, events, announcements"
+                href="/discover"
+                icon={<Sparkles className="w-6 h-6" />}
+              />
+            </div>
+
+            {/* New member CTA */}
+            <Link
+              href="/signup"
+              className="group w-full rounded-[1.4rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-xl focus:outline-none focus:ring-4 focus:ring-blue-200"
+            >
+              <div className="w-full h-16 rounded-[1.25rem] bg-white/85 backdrop-blur grid place-items-center">
+                <div className="flex items-center gap-2 font-semibold text-blue-700 group-hover:text-blue-800">
+                  <UserPlus className="h-5 w-5" />
+                  <span>I’m new to GoCreate</span>
+                </div>
+              </div>
+            </Link>
+
+            {/* Tiny helper note */}
+            <div className="text-xs text-slate-500 text-center">
+              Prefer help? The front desk is happy to assist with anything.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Invisible click tester for dev (click the pad area to commit buffer) */}
+      <button
+        onClick={clickToTest}
+        className="sr-only"
+        aria-label="Test commit scan"
+      />
 
       {/* Relink / Assistance modal */}
       <AnimatePresence>
@@ -695,5 +853,27 @@ export default function NovaPublicHome() {
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+// —————————————————————————————————————————————
+// Small card for the mini dashboard grid
+// —————————————————————————————————————————————
+function DashCard({ title, subtitle, href, icon }) {
+  return (
+    <Link
+      href={href}
+      className="group rounded-2xl border border-slate-200 bg-white/60 backdrop-blur hover:bg-white/80 transition-colors shadow-md p-4 focus:outline-none focus:ring-4 focus:ring-blue-100"
+    >
+      <div className="flex items-start gap-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-2 shadow-sm group-hover:shadow">
+          <div className="text-slate-700">{icon}</div>
+        </div>
+        <div className="min-w-0">
+          <div className="font-semibold text-slate-900">{title}</div>
+          <div className="text-xs text-slate-600 mt-0.5 line-clamp-2">{subtitle}</div>
+        </div>
+      </div>
+    </Link>
   );
 }
