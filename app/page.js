@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo, useRef } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -64,6 +64,21 @@ export default function NovaPublicHome() {
   const [greeting, setGreeting] = useState('');
   const [phrase, setPhrase] = useState(phrases[Math.floor(Math.random() * phrases.length)]);
 
+  // Live clock (for Quick Actions header with seconds)
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const tick = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(tick);
+  }, []);
+  const dateStr = useMemo(
+    () => now.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }),
+    [now]
+  );
+  const timeStr = useMemo(
+    () => now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    [now]
+  );
+
   // Scanner buffer
   const [buf, setBuf] = useState('');
   const [lastKeyAt, setLastKeyAt] = useState(0);
@@ -73,7 +88,7 @@ export default function NovaPublicHome() {
   const [showRelinkModal, setShowRelinkModal] = useState(false);
   const [pendingBadgeCode, setPendingBadgeCode] = useState('');
   const [pendingScanId, setPendingScanId] = useState(null);
-  const [dismissIn, setDismissIn] = useState(20); // ← 20s
+  const [dismissIn, setDismissIn] = useState(20); // 20s
 
   // Self-serve wizard
   const [showWizard, setShowWizard] = useState(false);
@@ -90,26 +105,22 @@ export default function NovaPublicHome() {
   // Front desk help
   const [helpNotified, setHelpNotified] = useState(false);
   const [helpNotifying, setHelpNotifying] = useState(false);
-// --- commit dedupe (prevents double scans from Enter + idle or CRLF) ---
-const lastCommitRef = useRef({ code: '', at: 0 });
-const pendingCommitRef = useRef(null);
 
-function requestCommit(raw) {
-  const c = clamp5(raw || '');
-  if (c.length < 5) return;
-
-  const now = Date.now();
-  const { code: prev, at } = lastCommitRef.current;
-  // suppress duplicates of same code within 1s
-  if (prev === c && now - at < 1000) return;
-
-  lastCommitRef.current = { code: c, at: now };
-  // cancel any micro-queued commit
-  if (pendingCommitRef.current) clearTimeout(pendingCommitRef.current);
-  pendingCommitRef.current = setTimeout(() => {
-    commitScan(c); // plays sound + handles Firestore
-  }, 0);
-}
+  // --- commit dedupe (prevents double scans from Enter + idle or CRLF) ---
+  const lastCommitRef = useRef({ code: '', at: 0 });
+  const pendingCommitRef = useRef(null);
+  function requestCommit(raw) {
+    const c = clamp5(raw || '');
+    if (c.length < 5) return;
+    const nowMs = Date.now();
+    const { code: prev, at } = lastCommitRef.current;
+    if (prev === c && nowMs - at < 1000) return; // suppress same code within 1s
+    lastCommitRef.current = { code: c, at: nowMs };
+    if (pendingCommitRef.current) clearTimeout(pendingCommitRef.current);
+    pendingCommitRef.current = setTimeout(() => {
+      commitScan(c);
+    }, 0);
+  }
 
   useEffect(() => { refreshRoles(false); }, [refreshRoles]);
 
@@ -136,11 +147,11 @@ function requestCommit(raw) {
         setBuf((prev) => clamp5(prev + k));
         setLastKeyAt(Date.now());
       } else if (k === 'Enter') {
- if (buf.length >= 5) {
-    e.preventDefault();
-    requestCommit(buf.slice(0, 5));
- }
-  } else if (k === 'Escape') {
+        if (buf.length >= 5) {
+          e.preventDefault();
+          requestCommit(buf.slice(0, 5));
+        }
+      } else if (k === 'Escape') {
         resetBuffer();
       }
     };
@@ -153,12 +164,12 @@ function requestCommit(raw) {
   useEffect(() => {
     if (!buf || showRelinkModal || showWizard) return;
     const elapsed = Date.now() - lastKeyAt;
- if (buf.length >= 5 && elapsed > 140) {
-   requestCommit(buf.slice(0, 5)); return;
- }
+    if (buf.length >= 5 && elapsed > 140) {
+      requestCommit(buf.slice(0, 5)); return;
+    }
     const t = setTimeout(() => {
       const gap = Date.now() - lastKeyAt;
-      if (buf.length >= 5 && gap > 200) commitScan(buf.slice(0, 5));
+      if (buf.length >= 5 && gap > 200) requestCommit(buf.slice(0, 5));
     }, 220);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -255,7 +266,7 @@ function requestCommit(raw) {
   // RELINK / WIZARD HELPERS
   // —————————————————————————————————————————————
   function openRelinkModal() {
-    setDismissIn(20); // ← reset to 20 when opening
+    setDismissIn(20);
     setHelpNotified(false);
     setShowRelinkModal(true);
     resetBuffer();
@@ -318,7 +329,7 @@ function requestCommit(raw) {
         });
       }
     } catch (e) { console.warn('Could not mark flow choice on scan:', e); }
-    await ensureUsersLoaded(); // ← ensure we have users even in prod
+    await ensureUsersLoaded();
     setShowWizard(true);
   };
 
@@ -407,11 +418,33 @@ function requestCommit(raw) {
   // —————————————————————————————————————————————
   return (
     <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white text-slate-900">
+      {/* Bokeh background layer */}
+      <div className="pointer-events-none absolute inset-0 -z-10">
+        <motion.div
+          className="absolute -top-24 -left-24 w-[520px] h-[520px] rounded-full blur-3xl"
+          style={{ background: 'radial-gradient(35% 35% at 50% 50%, rgba(99,102,241,0.45), rgba(99,102,241,0))' }}
+          animate={{ x: [0, 20, -10, 0], y: [0, -10, 15, 0] }}
+          transition={{ duration: 18, repeat: Infinity, ease: 'easeInOut' }}
+        />
+        <motion.div
+          className="absolute top-1/3 -right-16 w-[600px] h-[600px] rounded-full blur-[90px]"
+          style={{ background: 'radial-gradient(40% 40% at 50% 50%, rgba(14,165,233,0.40), rgba(14,165,233,0))' }}
+          animate={{ x: [0, -20, 10, 0], y: [0, 10, -15, 0] }}
+          transition={{ duration: 22, repeat: Infinity, ease: 'easeInOut' }}
+        />
+        <motion.div
+          className="absolute bottom-[-140px] left-1/3 w-[520px] h-[520px] rounded-full blur-[80px]"
+          style={{ background: 'radial-gradient(45% 45% at 50% 50%, rgba(16,185,129,0.35), rgba(16,185,129,0))' }}
+          animate={{ x: [0, 10, -15, 0], y: [0, -8, 12, 0] }}
+          transition={{ duration: 26, repeat: Infinity, ease: 'easeInOut' }}
+        />
+      </div>
+
       {/* Main grid centered vertically */}
       <div className="max-w-7xl mx-auto px-6 py-10 min-h-screen flex items-center">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 w-full items-stretch">
           {/* LEFT: Scanner zone */}
-          <section className="relative rounded-[2rem] overflow-hidden min-h-[620px] border border-slate-200 bg-gradient-to-b from-white/70 via-sky-50/60 to-white">
+          <section className="relative rounded-[2rem] overflow-hidden min-h-[620px] border border-slate-200 bg-gradient-to-b from-white/70 via-sky-50/60 to-white backdrop-blur-md shadow-xl">
             {/* Top content */}
             <div className="px-8 md:px-10 pt-8">
               <h2 className="text-3xl md:text-4xl font-extrabold gradient-text">{greeting}</h2>
@@ -427,15 +460,10 @@ function requestCommit(raw) {
               </div>
             </div>
 
-            {/* Gray scan glyph — aligned under the copy column, not floating center */}
+            {/* Gray scan glyph — aligned under the copy column */}
             <div
               className="absolute"
-              style={{
-                // Align to the same left padding as copy, sit in the middle third vertically
-                left: 40, // slightly inset from px-8 padding for balance
-                top: '52%',
-                transform: 'translateY(-50%)',
-              }}
+              style={{ left: 40, top: '52%', transform: 'translateY(-50%)' }}
             >
               <motion.div
                 animate={{ scale: isReading ? [1, 1.08, 1] : 1, opacity: isReading ? [0.45, 1, 0.45] : 0.35 }}
@@ -453,7 +481,7 @@ function requestCommit(raw) {
                 transition={{ repeat: Infinity, duration: 1.5, ease: 'easeInOut' }}
                 className="flex flex-col items-start"
               >
-                <div className="rounded-full bg-indigo-600 text-white shadow-lg px-5 py-2 text-base md:text-lg font-semibold mb-2">
+                <div className="rounded-full bg-indigo-600/95 text-white shadow-lg px-5 py-2 text-base md:text-lg font-semibold mb-2 backdrop-blur">
                   Scan here
                 </div>
                 <ArrowDown className="w-16 h-16 md:w-20 md:h-20 text-indigo-600 drop-shadow" strokeWidth={2.4} />
@@ -465,18 +493,22 @@ function requestCommit(raw) {
               onClick={clickToTest}
               aria-label="Test commit scan"
               className="absolute"
-              style={{
-                left: 16,
-                bottom: 8,
-                width: 260,
-                height: 120,
-                background: 'transparent',
-              }}
+              style={{ left: 16, bottom: 8, width: 260, height: 120, background: 'transparent' }}
             />
           </section>
 
           {/* RIGHT: Quick Actions — centered vertically */}
           <aside className="flex flex-col items-stretch justify-center">
+            {/* Date + Time (with seconds) */}
+            <div className="flex items-center justify-center gap-3 mb-2">
+              <div className="rounded-2xl px-4 py-2 bg-white/60 backdrop-blur border border-slate-200 shadow-sm text-slate-700 text-sm font-semibold">
+                {dateStr}
+              </div>
+              <div className="rounded-2xl px-4 py-2 bg-slate-900/90 text-white border border-slate-800 shadow-sm text-sm font-semibold">
+                {timeStr}
+              </div>
+            </div>
+
             <div className="px-1 text-sm font-semibold tracking-wide text-slate-500 uppercase text-center">
               Quick Actions
             </div>
@@ -487,7 +519,7 @@ function requestCommit(raw) {
                 subtitle="How it works, safety, studios"
                 href="/about"
                 icon={<Info className="w-7 h-7 text-blue-600" />}
-                accent="from-blue-50 to-white"
+                accent="from-blue-50/70 to-white/70"
                 textClass="text-blue-700"
               />
               <DashCard
@@ -495,7 +527,7 @@ function requestCommit(raw) {
                 subtitle="See projects members made"
                 href="/gallery"
                 icon={<ImageIcon className="w-7 h-7 text-pink-600" />}
-                accent="from-pink-50 to-white"
+                accent="from-pink-50/70 to-white/70"
                 textClass="text-pink-700"
               />
               <DashCard
@@ -503,7 +535,7 @@ function requestCommit(raw) {
                 subtitle="Find studios & front desk"
                 href="/map"
                 icon={<MapPin className="w-7 h-7 text-emerald-600" />}
-                accent="from-emerald-50 to-white"
+                accent="from-emerald-50/70 to-white/70"
                 textClass="text-emerald-700"
               />
               <DashCard
@@ -511,7 +543,7 @@ function requestCommit(raw) {
                 subtitle="Classes, events, announcements"
                 href="/discover"
                 icon={<Sparkles className="w-7 h-7 text-amber-600" />}
-                accent="from-amber-50 to-white"
+                accent="from-amber-50/70 to-white/70"
                 textClass="text-amber-700"
               />
             </div>
@@ -520,7 +552,7 @@ function requestCommit(raw) {
               href="/signup"
               className="group w-full mt-6 rounded-[1.4rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-xl focus:outline-none focus:ring-4 focus:ring-blue-200"
             >
-              <div className="w-full h-16 rounded-[1.25rem] bg-white/85 backdrop-blur grid place-items-center">
+              <div className="w-full h-16 rounded-[1.25rem] bg-white/80 backdrop-blur grid place-items-center">
                 <div className="flex items-center gap-2 font-semibold text-blue-700 group-hover:text-blue-800">
                   <UserPlus className="h-5 w-5" />
                   <span>I’m new to GoCreate</span>
@@ -718,10 +750,10 @@ function DashCard({ title, subtitle, href, icon, accent = 'from-slate-50 to-whit
   return (
     <Link
       href={href}
-      className={`group rounded-2xl border border-slate-200 bg-gradient-to-b ${accent} backdrop-blur hover:bg-white/80 transition-colors shadow-md p-4 focus:outline-none focus:ring-4 focus:ring-blue-100`}
+      className={`group rounded-2xl border border-slate-200 bg-gradient-to-b ${accent} backdrop-blur-lg hover:bg-white/80 transition-colors shadow-md p-4 focus:outline-none focus:ring-4 focus:ring-blue-100`}
     >
       <div className="flex items-start gap-3">
-        <div className="rounded-xl border border-slate-200 bg-white p-2 shadow-sm group-hover:shadow">
+        <div className="rounded-xl border border-slate-200 bg-white/90 backdrop-blur p-2 shadow-sm group-hover:shadow">
           {icon}
         </div>
         <div className="min-w-0">
