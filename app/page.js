@@ -17,8 +17,6 @@ import {
   Image as ImageIcon,
   MapPin,
   Sparkles,
-  Clock,
-  CalendarDays,
 } from 'lucide-react';
 import {
   getFirestore,
@@ -34,7 +32,6 @@ import {
 } from 'firebase/firestore';
 
 import { app } from './lib/firebase';
-import CornerUtilities from './components/CornerUtilities';
 import { useUser } from './context/UserContext';
 
 // —————————————————————————————————————————————
@@ -46,11 +43,6 @@ const normalize = (s) =>
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
-
-const formatTime = (d = new Date()) =>
-  d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-const formatDate = (d = new Date()) =>
-  d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
 
 const phrases = [
   'Create boldly. Be kind.',
@@ -70,9 +62,8 @@ export default function NovaPublicHome() {
   // Kiosk identity (stable)
   const kioskId = 'front-desk-1';
 
-  // Greeting / time
+  // Greeting / vibe
   const [greeting, setGreeting] = useState('');
-  const [now, setNow] = useState(new Date());
   const [phrase, setPhrase] = useState(
     phrases[Math.floor(Math.random() * phrases.length)]
   );
@@ -106,18 +97,16 @@ export default function NovaPublicHome() {
     refreshRoles(false);
   }, [refreshRoles]);
 
-  // Time / Greeting
+  // Greeting
   useEffect(() => {
-    const updateTime = () => {
-      const d = new Date();
-      setNow(d);
-      const hour = d.getHours();
+    const updateGreeting = () => {
+      const hour = new Date().getHours();
       if (hour < 12) setGreeting('Good Morning');
       else if (hour < 18) setGreeting('Good Afternoon');
       else setGreeting('Good Evening');
     };
-    updateTime();
-    const id = setInterval(updateTime, 30_000);
+    updateGreeting();
+    const id = setInterval(updateGreeting, 30_000);
     return () => clearInterval(id);
   }, []);
 
@@ -127,7 +116,7 @@ export default function NovaPublicHome() {
       // pause live scanning while dialogs are active
       if (showRelinkModal || showWizard) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      const k = (e.key ?? '');
+      const k = e.key ?? '';
       if (/\d/.test(k)) {
         setIsReading(true);
         setBuf((prev) => clamp5(prev + k));
@@ -254,7 +243,7 @@ export default function NovaPublicHome() {
       localStorage.setItem('nova-user', JSON.stringify(scanned));
       setCurrentUser(scanned);
       router.replace('/checkin');
-    } catch (erry) {
+    } catch (err) {
       console.error('Scan lookup error:', err);
       try {
         const ref = await addDoc(collection(db, 'scans'), {
@@ -375,8 +364,7 @@ export default function NovaPublicHome() {
         return;
       }
 
-      // Match on name/email contains; prefer word-starts
-      const starts= [];
+      const starts = [];
       const contains = [];
       for (const u of allUsersIndexed) {
         if (!u.nameNorm && !u.emailNorm) continue;
@@ -410,7 +398,6 @@ export default function NovaPublicHome() {
         },
       });
 
-      // mark the original not_found/error scan as relinked + who we matched
       if (pendingScanId) {
         await updateDoc(doc(db, 'scans', pendingScanId), {
           matchedUserId: selectedUser.id,
@@ -437,7 +424,6 @@ export default function NovaPublicHome() {
         });
       }
 
-      // Store locally and continue to check-in
       const enriched = { ...selectedUser, badge: { id: String(pendingBadgeCode) } };
       localStorage.setItem('nova-user', JSON.stringify(enriched));
       setCurrentUser(enriched);
@@ -457,169 +443,135 @@ export default function NovaPublicHome() {
   // —————————————————————————————————————————————
   return (
     <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white text-slate-900">
-      {/* Corner utilities moved top-right for this page */}
-      <div className="fixed top-3 right-3 z-[30] opacity-90">
-        <CornerUtilities />
+      {/* Main grid centered vertically */}
+      <div className="max-w-7xl mx-auto px-6 py-10 min-h-screen flex items-center">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 w-full items-stretch">
+          {/* LEFT: Full-bleed scanner zone */}
+          <section className="relative rounded-[2rem] overflow-hidden min-h-[600px] border border-slate-200 bg-gradient-to-b from-white/70 via-sky-50/60 to-white">
+            {/* Header copy */}
+            <div className="p-8 md:p-10">
+              <div className="text-3xl md:text-4xl font-bold">{greeting}</div>
+              <p className="text-slate-500 mt-1">{phrase}</p>
+
+              <div className="mt-6 max-w-xl">
+                <h1 className="text-3xl md:text-4xl font-bold tracking-tight">
+                  Place your badge on the scanner
+                </h1>
+                <p className="mt-2 text-slate-600">
+                  Hold your card steady for a second. You&apos;ll hear a chime and we&apos;ll do the rest.
+                </p>
+              </div>
+            </div>
+
+            {/* BIG bouncing arrow & cue near bottom; anchored at 25% of container width */}
+            <div className="pointer-events-none absolute inset-x-0" style={{ bottom: 90 }}>
+              <div className="relative w-full">
+                <div className="absolute" style={{ left: 'calc(25% - 24px)' }}>
+                  <motion.div
+                    initial={{ y: 0 }}
+                    animate={{ y: [0, 20, 0] }}
+                    transition={{ repeat: Infinity, duration: 1.6, ease: 'easeInOut' }}
+                    className="flex flex-col items-center"
+                  >
+                    <div className="rounded-full bg-blue-600 text-white shadow-lg px-4 py-2 text-base md:text-lg font-semibold mb-3">
+                      Scan here
+                    </div>
+                    <ArrowDown className="w-16 h-16 md:w-20 md:h-20 text-blue-600 drop-shadow" strokeWidth={2.4} />
+                  </motion.div>
+                </div>
+              </div>
+            </div>
+
+            {/* Invisible pad hit-area (lets you click to commit buffer during dev) */}
+            <button
+              onClick={clickToTest}
+              aria-label="Test commit scan"
+              className="absolute"
+              style={{
+                left: 'calc(25% - 110px)',
+                bottom: 6,
+                width: 220,
+                height: 110,
+                background: 'transparent',
+              }}
+            />
+
+            {/* (Removed the “Ready/Reading” pill to keep the area clean) */}
+
+            {/* Subtle center glyph pulsing when keys stream in (keeps feedback without copy) */}
+            <div className="absolute inset-0 grid place-items-center pointer-events-none">
+              <motion.div
+                animate={{ scale: isReading ? [1, 1.06, 1] : 1, opacity: isReading ? [0.6, 1, 0.6] : 0.3 }}
+                transition={{ repeat: isReading ? Infinity : 0, duration: 1.6, ease: 'easeInOut' }}
+              >
+                <ScanLine className="text-slate-700" style={{ width: 64, height: 64 }} strokeWidth={1.8} />
+              </motion.div>
+            </div>
+          </section>
+
+          {/* RIGHT: Quick Actions only */}
+          <aside className="flex flex-col gap-6">
+            <div className="px-1 text-sm font-semibold tracking-wide text-slate-500 uppercase">
+              Quick Actions
+            </div>
+
+            <div className="grid grid-cols-2 gap-5">
+              <DashCard
+                title="About"
+                subtitle="How it works, safety, studios"
+                href="/about"
+                icon={<Info className="w-7 h-7 text-blue-600" />}
+                accent="from-blue-50 to-white"
+                textClass="text-blue-700"
+              />
+              <DashCard
+                title="Gallery"
+                subtitle="See projects members made"
+                href="/gallery"
+                icon={<ImageIcon className="w-7 h-7 text-pink-600" />}
+                accent="from-pink-50 to-white"
+                textClass="text-pink-700"
+              />
+              <DashCard
+                title="Map"
+                subtitle="Find studios & front desk"
+                href="/map"
+                icon={<MapPin className="w-7 h-7 text-emerald-600" />}
+                accent="from-emerald-50 to-white"
+                textClass="text-emerald-700"
+              />
+              <DashCard
+                title="What’s New"
+                subtitle="Classes, events, announcements"
+                href="/discover"
+                icon={<Sparkles className="w-7 h-7 text-amber-600" />}
+                accent="from-amber-50 to-white"
+                textClass="text-amber-700"
+              />
+            </div>
+
+            <Link
+              href="/signup"
+              className="group w-full rounded-[1.4rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-xl focus:outline-none focus:ring-4 focus:ring-blue-200"
+            >
+              <div className="w-full h-16 rounded-[1.25rem] bg-white/85 backdrop-blur grid place-items-center">
+                <div className="flex items-center gap-2 font-semibold text-blue-700 group-hover:text-blue-800">
+                  <UserPlus className="h-5 w-5" />
+                  <span>I’m new to GoCreate</span>
+                </div>
+              </div>
+            </Link>
+
+            <div className="text-xs text-slate-500 text-center">
+              Prefer help? The front desk is happy to assist with anything.
+            </div>
+          </aside>
+        </div>
       </div>
 
-      {/* Split layout */}
-      <div className="max-w-7xl mx-auto px-6 pb-10 pt-8 md:pt-10 grid grid-cols-1 lg:grid-cols-2 gap-8 items-stretch">
-        {/* LEFT: Full-bleed scanner zone (no card chrome) */}
-        <section className="relative rounded-[2rem] overflow-hidden min-h-[560px] border border-slate-200 bg-gradient-to-b from-white/70 via-sky-50/60 to-white">
-          {/* Header copy */}
-          <div className="p-8 md:p-10">
-            <div className="flex items-center gap-3 mb-2">
-              <Image src="/Logo.svg" alt="GoCreate Nova" width={40} height={40} priority />
-              <div className="text-2xl font-bold">{greeting}</div>
-            </div>
-            <p className="text-slate-500 text-sm">{phrase}</p>
-
-            <div className="mt-6 max-w-xl">
-              <h1 className="text-3xl md:text-4xl font-bold tracking-tight">
-                Place your badge on the scanner
-              </h1>
-              <p className="mt-2 text-slate-600">
-                Hold your card steady for a second. You&apos;ll hear a chime and we&apos;ll do the rest.
-              </p>
-            </div>
-          </div>
-
-          {/* Single time + date lives here? No — we show it on the right card only to avoid duplication */}
-
-          {/* Bouncing arrow & cue near bottom; anchored at 25% of container width */}
-          <div className="pointer-events-none absolute inset-x-0" style={{ bottom: 120 }}>
-            <div className="relative w-full">
-              <div className="absolute" style={{ left: 'calc(25% - 16px)' }}>
-                <motion.div
-                  initial={{ y: 0 }}
-                  animate={{ y: [0, 14, 0] }}
-                  transition={{ repeat: Infinity, duration: 1.6, ease: 'easeInOut' }}
-                  className="flex flex-col items-center"
-                >
-                  <div className="rounded-full bg-blue-600/90 text-white shadow-lg px-3 py-1 text-sm font-semibold mb-2">
-                    Scan here
-                  </div>
-                  <ArrowDown className="w-10 h-10 text-blue-600 drop-shadow" strokeWidth={2.2} />
-                </motion.div>
-              </div>
-            </div>
-          </div>
-
-          {/* Invisible pad hit-area (lets you click to commit buffer during dev) */}
-          <button
-            onClick={clickToTest}
-            aria-label="Test commit scan"
-            className="absolute"
-            style={{
-              left: 'calc(25% - 110px)',
-              bottom: 10,
-              width: 220,
-              height: 100,
-              background: 'transparent',
-            }}
-          />
-
-          {/* Live status pill */}
-          <div className="absolute left-6 bottom-6">
-            <div className="flex items-center gap-2 rounded-full bg-white/90 backdrop-blur px-3 py-1.5 border border-slate-200 shadow">
-              <div
-                className={`w-2.5 h-2.5 rounded-full ${
-                  isReading ? 'bg-green-500' : 'bg-slate-300'
-                }`}
-              />
-              <span className="text-sm font-medium">{isReading ? 'Reading…' : 'Ready'}</span>
-              {buf && (
-                <span className="text-xs px-2 py-0.5 rounded bg-slate-100 border border-slate-200">
-                  {buf}
-                </span>
-              )}
-            </div>
-          </div>
-        </section>
-
-        {/* RIGHT: Mini dashboard */}
-        <aside className="flex flex-col gap-6">
-          {/* Welcome panel with single date/time */}
-          <div className="rounded-[2rem] border border-slate-200 bg-white/70 backdrop-blur-md shadow-lg p-6">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm text-slate-500 flex items-center gap-2">
-                  <CalendarDays className="w-4 h-4" />
-                  <span>{formatDate(now)}</span>
-                </div>
-                <div className="text-2xl font-bold leading-tight mt-1">Welcome to GoCreate</div>
-                <div className="text-slate-600 mt-1">
-                  Scan to check in — or explore while you&apos;re here.
-                </div>
-              </div>
-              <div className="hidden md:block">
-                <div className="rounded-2xl px-4 py-2 bg-slate-900 text-white text-sm font-semibold shadow flex items-center gap-2">
-                  <Clock className="w-4 h-4" />
-                  {formatTime(now)}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Quick actions header */}
-          <div className="px-1 text-sm font-semibold tracking-wide text-slate-500 uppercase">
-            Quick Actions
-          </div>
-
-          {/* 2x2 quick grid with tasteful color accents */}
-          <div className="grid grid-cols-2 gap-5">
-            <DashCard
-              title="About"
-              subtitle="How it works, safety, studios"
-              href="/about"
-              icon={<Info className="w-6 h-6 text-blue-600" />}
-              accent="from-blue-50 to-white"
-              textClass="text-blue-700"
-            />
-            <DashCard
-              title="Gallery"
-              subtitle="See projects members made"
-              href="/gallery"
-              icon={<ImageIcon className="w-6 h-6 text-pink-600" />}
-              accent="from-pink-50 to-white"
-              textClass="text-pink-700"
-            />
-            <DashCard
-              title="Map"
-              subtitle="Find studios & front desk"
-              href="/map"
-              icon={<MapPin className="w-6 h-6 text-emerald-600" />}
-              accent="from-emerald-50 to-white"
-              textClass="text-emerald-700"
-            />
-            <DashCard
-              title="What’s New"
-              subtitle="Classes, events, announcements"
-              href="/discover"
-              icon={<Sparkles className="w-6 h-6 text-amber-600" />}
-              accent="from-amber-50 to-white"
-              textClass="text-amber-700"
-            />
-          </div>
-
-          {/* New member CTA */}
-          <Link
-            href="/signup"
-            className="group w-full rounded-[1.4rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-xl focus:outline-none focus:ring-4 focus:ring-blue-200"
-          >
-            <div className="w-full h-16 rounded-[1.25rem] bg-white/85 backdrop-blur grid place-items-center">
-              <div className="flex items-center gap-2 font-semibold text-blue-700 group-hover:text-blue-800">
-                <UserPlus className="h-5 w-5" />
-                <span>I’m new to GoCreate</span>
-              </div>
-            </div>
-          </Link>
-
-          {/* Tiny helper note */}
-          <div className="text-xs text-slate-500 text-center">
-            Prefer help? The front desk is happy to assist with anything.
-          </div>
-        </aside>
+      {/* Bottom-center GoCreate logo */}
+      <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[20] opacity-95">
+        <Image src="/Logo.svg" alt="GoCreate Nova" width={84} height={84} priority />
       </div>
 
       {/* Relink / Assistance modal */}
@@ -815,13 +767,7 @@ export default function NovaPublicHome() {
 // —————————————————————————————————————————————
 // Small card for the mini dashboard grid
 // —————————————————————————————————————————————
-function DashCard({
-  title,
-  subtitle,
-  href,
-  icon,
-  accent = 'from-slate-50 to-white',
-  textClass = 'text-slate-700',}) {
+function DashCard({ title, subtitle, href, icon, accent = 'from-slate-50 to-white', textClass = 'text-slate-700' }) {
   return (
     <Link
       href={href}
