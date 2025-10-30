@@ -1,20 +1,22 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ScanLine, UserPlus, AlertCircle } from 'lucide-react';
+import { ScanLine, UserPlus, AlertCircle, HandHelping, Search, CheckCircle2 } from 'lucide-react';
 import {
   getFirestore,
   collection,
   query,
   where,
   getDocs,
-  limit,               // ← keep
-  addDoc,              // ← NEW
-  serverTimestamp,     // ← NEW
+  limit as fsLimit,
+  addDoc,
+  updateDoc,
+  doc,
+  serverTimestamp,
 } from 'firebase/firestore';
 
 import { app } from './lib/firebase';
@@ -23,25 +25,40 @@ import { useUser } from './context/UserContext';
 
 // Helpers
 const digitsOnly = (s) => (s.match(/\d+/g)?.join('') ?? '');
+const clamp5 = (s) => digitsOnly(s).slice(0, 5);
 
 export default function NovaPublicHome() {
   // Greeting
   const [greeting, setGreeting] = useState('');
 
-  // Scanner buffer (global listener — no hidden input)
+  // Scanner buffer
   const [buf, setBuf] = useState('');
   const [lastKeyAt, setLastKeyAt] = useState(0);
   const [isReading, setIsReading] = useState(false);
 
-  // Not-found modal
-  const [showBadgeError, setShowBadgeError] = useState(false);
+  // Not-found → relink flow modal
+  const [showRelinkModal, setShowRelinkModal] = useState(false);
+  const [pendingBadgeCode, setPendingBadgeCode] = useState('');
   const [dismissIn, setDismissIn] = useState(7);
+
+  // Relink wizard (self-serve)
+  const [showWizard, setShowWizard] = useState(false);
+  const [nameQuery, setNameQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [results, setResults] = useState([]);
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [linking, setLinking] = useState(false);
+  const [linkDone, setLinkDone] = useState(false);
+
+  // Front desk help
+  const [helpNotified, setHelpNotified] = useState(false);
+  const [helpNotifying, setHelpNotifying] = useState(false);
+
   const { refreshRoles, setCurrentUser } = useUser();
   const router = useRouter();
   const db = getFirestore(app);
-const kioskId = 'front-desk-1'; // or any stable string that identifies this station
+  const kioskId = 'front-desk-1';
 
-  // Preload roles (cheap no-op if already cached)
   useEffect(() => { refreshRoles(false); }, [refreshRoles]);
 
   // Time / Greeting
@@ -60,12 +77,13 @@ const kioskId = 'front-desk-1'; // or any stable string that identifies this sta
   // Global key buffer
   useEffect(() => {
     const onKey = (e) => {
-      if (showBadgeError) return; // pause scanner while modal is open
+      // pause scanner while modals are open
+      if (showRelinkModal || showWizard) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const k = e.key ?? '';
       if (/\d/.test(k)) {
         setIsReading(true);
-        setBuf((prev) => digitsOnly(prev + k).slice(0, 10));
+        setBuf((prev) => clamp5(prev + k));
         setLastKeyAt(Date.now());
       } else if (k === 'Enter') {
         if (buf.length >= 5) {
@@ -79,11 +97,11 @@ const kioskId = 'front-desk-1'; // or any stable string that identifies this sta
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [buf, showBadgeError]);
+  }, [buf, showRelinkModal, showWizard]);
 
   // Idle auto-commit
   useEffect(() => {
-    if (!buf || showBadgeError) return;
+    if (!buf || showRelinkModal || showWizard) return;
     const elapsed = Date.now() - lastKeyAt;
     if (buf.length >= 5 && elapsed > 140) {
       commitScan(buf.slice(0, 5));
@@ -95,7 +113,7 @@ const kioskId = 'front-desk-1'; // or any stable string that identifies this sta
     }, 220);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [buf, lastKeyAt, showBadgeError]);
+  }, [buf, lastKeyAt, showRelinkModal, showWizard]);
 
   function resetBuffer() {
     setBuf('');
@@ -103,102 +121,11 @@ const kioskId = 'front-desk-1'; // or any stable string that identifies this sta
     setLastKeyAt(0);
   }
 
-// replace your current handleScan with this
-const handleScan = async (code) => {
-  try {
-    const badgeCode = digitsOnly(code).slice(0, 5);
-    if (badgeCode.length !== 5) return;
-
-    const usersCol = collection(db, 'users');
-    const asString = String(badgeCode);
-    const asNumber = Number(badgeCode);
-
-    // Try multiple fields + types, first hit wins
-    const fields = ['badge.id', 'badge.badgeNumber'];
-    let hit = null;
-
-    for (const field of fields) {
-      for (const val of [asString, asNumber]) {
-        try {
-          const qs = query(usersCol, where(field, '==', val), limit(1));
-          const snap = await getDocs(qs);
-          if (!snap.empty) { hit = snap.docs[0]; break; }
-        } catch (e) {
-          // ignore and try the next combo
-          console.warn(`Lookup failed on ${field} == ${val}`, e);
-        }
-      }
-      if (hit) break;
-    }
-
-    if (!hit) {
-      // log NOT FOUND scan for /sessions "Last Scan" card
-      await addDoc(collection(db, 'scans'), {
-        badgeCode,
-        matchedUserId: null,
-        user: null,
-        status: 'not_found',
-        createdAt: serverTimestamp(),
-        kioskId,
-      });
-
-      openBadgeError();
-      return;
-    }
-
-    // we found a user — embed minimal user data for quick display
-    const data = hit.data() || {};
-    const matchedUser = {
-      id: hit.id,
-      name: data.fullName || data.name || '',
-      photoURL: data.photoURL || null,
-    };
-
-    // log MATCHED scan for /sessions
-    await addDoc(collection(db, 'scans'), {
-      badgeCode,
-      matchedUserId: hit.id,
-      user: matchedUser,
-      status: 'matched',
-      createdAt: serverTimestamp(),
-      kioskId,
-    });
-
-    const scanned = { id: hit.id, ...data };
-    localStorage.setItem('nova-user', JSON.stringify(scanned));
-    setCurrentUser(scanned);
-
-    // use replace so the kiosk can't "back" to the scanner
-    router.replace('/checkin');
-    console.log('Routing to /checkin with', scanned);
-  } catch (err) {
-    console.error('Scan lookup error:', err);
-
-    // Log as error so /sessions still sees the attempt
-    try {
-      await addDoc(collection(db, 'scans'), {
-        badgeCode: digitsOnly(code).slice(0, 5) || null,
-        matchedUserId: null,
-        user: null,
-        status: 'error',
-        errorMessage: String(err?.message || err),
-        createdAt: serverTimestamp(),
-        kioskId,
-      });
-    } catch (_) {}
-
-    openBadgeError();
-  }
-};
-
-
-
-  // Sounds
-  function playScanSound() {
+  const playScanSound = () => {
     const audio = new Audio('/scan.mp3');
     audio.volume = 1;
     audio.play().catch(() => {});
-  }
+  };
 
   async function commitScan(code) {
     setIsReading(false);
@@ -207,45 +134,241 @@ const handleScan = async (code) => {
   }
 
   const clickToTest = async () => {
-    if (showBadgeError) return;
+    if (showRelinkModal || showWizard) return;
     if (buf.length === 5) return commitScan(buf);
   };
 
-  // Badge error modal helpers
-  function openBadgeError() {
+  // MAIN SCAN HANDLER
+  const handleScan = async (code) => {
+    try {
+      const badgeCode = clamp5(code);
+      if (badgeCode.length !== 5) return;
+
+      const usersCol = collection(db, 'users');
+      const asString = String(badgeCode);
+      const asNumber = Number(badgeCode);
+
+      // Try multiple fields + types
+      const fields = ['badge.id', 'badge.badgeNumber'];
+      let hit = null;
+
+      for (const field of fields) {
+        for (const val of [asString, asNumber]) {
+          try {
+            const qs = query(usersCol, where(field, '==', val), fsLimit(1));
+            const snap = await getDocs(qs);
+            if (!snap.empty) { hit = snap.docs[0]; break; }
+          } catch (e) {
+            console.warn(`Lookup failed on ${field} == ${val}`, e);
+          }
+        }
+        if (hit) break;
+      }
+
+      if (!hit) {
+        // NO MATCH → open relink UX instead of generic error
+        await addDoc(collection(db, 'scans'), {
+          badgeCode,
+          matchedUserId: null,
+          user: null,
+          status: 'not_found',
+          createdAt: serverTimestamp(),
+          kioskId,
+        });
+        setPendingBadgeCode(badgeCode);
+        openRelinkModal();
+        return;
+      }
+
+      // MATCH → proceed to check-in as before
+      const data = hit.data() || {};
+      const matchedUser = {
+        id: hit.id,
+        name: data.fullName || data.name || '',
+        photoURL: data.photoURL || null,
+      };
+
+      await addDoc(collection(db, 'scans'), {
+        badgeCode,
+        matchedUserId: hit.id,
+        user: matchedUser,
+        status: 'matched',
+        createdAt: serverTimestamp(),
+        kioskId,
+      });
+
+      const scanned = { id: hit.id, ...data };
+      localStorage.setItem('nova-user', JSON.stringify(scanned));
+      setCurrentUser(scanned);
+      router.replace('/checkin');
+    } catch (err) {
+      console.error('Scan lookup error:', err);
+      try {
+        await addDoc(collection(db, 'scans'), {
+          badgeCode: clamp5(code) || null,
+          matchedUserId: null,
+          user: null,
+          status: 'error',
+          errorMessage: String(err?.message || err),
+          createdAt: serverTimestamp(),
+          kioskId,
+        });
+      } catch (_) {}
+      // Fall back to relink screen with friendly copy
+      setPendingBadgeCode(clamp5(code));
+      openRelinkModal();
+    }
+  };
+
+  // Relink modal helpers
+  function openRelinkModal() {
     setDismissIn(7);
-    setShowBadgeError(true);
+    setHelpNotified(false);
+    setShowRelinkModal(true);
     resetBuffer();
   }
-  function closeBadgeError() {
-    setShowBadgeError(false);
+  function closeRelinkModal() {
+    setShowRelinkModal(false);
+    setShowWizard(false);
+    setSelectedUser(null);
+    setResults([]);
+    setNameQuery('');
     resetBuffer();
   }
 
-  // Auto-dismiss countdown
+  // Auto-dismiss when idle IF user doesn’t interact (only if they haven’t chosen a path)
   useEffect(() => {
-    if (!showBadgeError) return;
+    if (!showRelinkModal || showWizard) return;
     if (dismissIn <= 0) {
-      closeBadgeError();
+      closeRelinkModal();
       return;
     }
     const id = setTimeout(() => setDismissIn((s) => s - 1), 1000);
     return () => clearTimeout(id);
-  }, [showBadgeError, dismissIn]);
+  }, [showRelinkModal, showWizard, dismissIn]);
+
+  // ---------- Self-Serve: Search & Link ----------
+  const searchCandidates = async () => {
+    const q = (nameQuery || '').trim().toLowerCase();
+    if (!q || q.length < 2) {
+      setResults([]);
+      return;
+    }
+    setIsSearching(true);
+
+    try {
+      // Preferred: denormalized field "nameLower" to support range query
+      // If your users have "nameLower", this is efficient & indexable.
+      // Otherwise, we fall back to a broader fetch + client filter.
+      const usersCol = collection(db, 'users');
+      let snap;
+      try {
+        const qs = query(
+          usersCol,
+          where('nameLower', '>=', q),
+          where('nameLower', '<=', q + '\uf8ff'),
+          fsLimit(10)
+        );
+        snap = await getDocs(qs);
+      } catch {
+        // Fallback: pull a small page and filter client-side
+        // (Consider replacing with Algolia/CF for production-scale search)
+        const qs = query(usersCol, fsLimit(25));
+        snap = await getDocs(qs);
+      }
+
+      const items = [];
+      snap.forEach((d) => {
+        const data = d.data() || {};
+        const name = data.fullName || data.name || '';
+        const email = data.email || '';
+        const phone = data.phone || data.phoneNumber || '';
+        const lowered = (name || '').toLowerCase();
+        if (!lowered || (nameLowerMatch(lowered, q) || email.toLowerCase().includes(q))) {
+          items.push({
+            id: d.id,
+            name,
+            email,
+            phone,
+            photoURL: data.photoURL || null,
+            membershipType: data.membershipType || data.membership || '',
+          });
+        }
+      });
+      setResults(items.slice(0, 10));
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const nameLowerMatch = (lowered, q) => {
+    // simple contains or word-start check
+    return lowered.includes(q) || lowered.split(' ').some((w) => w.startsWith(q));
+  };
+
+  const linkBadgeToUser = async () => {
+    if (!selectedUser || !pendingBadgeCode) return;
+    setLinking(true);
+    try {
+      const userRef = doc(db, 'users', selectedUser.id);
+      await updateDoc(userRef, {
+        badge: {
+          id: String(pendingBadgeCode),
+          badgeNumber: Number(pendingBadgeCode),
+          linkedAt: serverTimestamp(),
+          kioskId,
+        },
+      });
+
+      // Store locally + route to /checkin
+      const enriched = { ...selectedUser, badge: { id: String(pendingBadgeCode) } };
+      localStorage.setItem('nova-user', JSON.stringify(enriched));
+      setCurrentUser(enriched);
+
+      setLinkDone(true);
+      // graceful micro-delay for success state
+      setTimeout(() => router.replace('/checkin'), 700);
+    } catch (e) {
+      console.error('Badge link error:', e);
+      alert('We hit a snag linking that badge. Please try again or ask the front desk.');
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  // ---------- Front Desk Help ----------
+  const notifyFrontDesk = async () => {
+    if (helpNotified || helpNotifying) return;
+    setHelpNotifying(true);
+    try {
+      await addDoc(collection(db, 'assistanceRequests'), {
+        type: 'badge_relink',
+        kioskId,
+        badgeCode: pendingBadgeCode || null,
+        status: 'open',
+        createdAt: serverTimestamp(),
+      });
+      setHelpNotified(true);
+    } catch (e) {
+      console.error('Notify front desk error:', e);
+      alert('Could not notify the front desk. Please walk over for assistance.');
+    } finally {
+      setHelpNotifying(false);
+    }
+  };
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white flex flex-col items-center justify-center text-slate-900">
       <CornerUtilities />
 
-     {/* Main card */}
-<motion.div
-  initial={{ opacity: 0, y: 20 }}
-  animate={{ opacity: 1, y: 0 }}
-  transition={{ duration: 0.8, ease: 'easeOut' }}
-  className="relative backdrop-blur-md bg-white/50 border border-slate-200 
-             rounded-[2rem] shadow-xl w-[90%] max-w-3xl p-10 flex flex-col items-center"
->
-  <Image src="/Logo.svg" alt="GoCreate Nova Logo" width={120} height={120} priority />
+      {/* Main card */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.8, ease: 'easeOut' }}
+        className="relative backdrop-blur-md bg-white/50 border border-slate-200 rounded-[2rem] shadow-xl w-[90%] max-w-3xl p-10 flex flex-col items-center"
+      >
+        <Image src="/Logo.svg" alt="GoCreate Nova Logo" width={120} height={120} priority />
         <h1 className="text-2xl md:text-3xl font-bold text-center mt-4">{greeting}</h1>
 
         {/* Scan headline + icon */}
@@ -266,7 +389,7 @@ const handleScan = async (code) => {
               animate={{
                 boxShadow: [
                   '0 0 0 0 rgba(37,99,235,0)',
-                  '0 0 0 16px rgba(37,99,235,0.12)', // blue-600 at low alpha
+                  '0 0 0 16px rgba(37,99,235,0.12)',
                   '0 0 0 0 rgba(37,99,235,0)',
                 ],
               }}
@@ -288,99 +411,206 @@ const handleScan = async (code) => {
             <div className="w-full border-t border-slate-200" />
           </div>
           <div className="relative flex justify-center">
-            <span className="px-4 bg-white text-slate-400 text-sm font-medium tracking-wide">
-              OR
-            </span>
+            <span className="px-4 bg-white text-slate-400 text-sm font-medium tracking-wide">OR</span>
           </div>
         </div>
 
-        {/* Join link */}
+        {/* Prominent New Member CTA */}
         <Link
           href="/signup"
-          className="flex items-center gap-2 text-lg font-semibold text-blue-600 hover:opacity-90 transition-colors"
+          className="group w-full max-w-sm rounded-[1.25rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-lg"
         >
-          <UserPlus className="h-5 w-5" />
-          <span>Join GoCreate</span>
+          <div className="w-full h-14 rounded-[1.15rem] bg-white/80 backdrop-blur-sm grid place-items-center">
+            <div className="flex items-center gap-2 font-semibold text-blue-700 group-hover:text-blue-800">
+              <UserPlus className="h-5 w-5" />
+              <span>I’m new to GoCreate</span>
+            </div>
+          </div>
         </Link>
-</motion.div>
-
-{/* Not-found modal */}
-{/* Not-found modal */}
-<AnimatePresence>
-  {showBadgeError && (
-    <motion.div
-      key="overlay"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[9999] flex items-center justify-center bg-blue-100/70 backdrop-blur-sm"
-    >
-      <motion.div
-        key="card"
-        initial={{ y: 24, opacity: 0, scale: 0.98 }}
-        animate={{ y: 0, opacity: 1, scale: 1 }}
-        exit={{ y: 8, opacity: 0, scale: 0.98 }}
-        transition={{ type: 'spring', stiffness: 300, damping: 28 }}
-        className="w-full max-w-md rounded-[2rem] text-center flex flex-col items-center"
-        style={{
-          backgroundColor: "#ffffff", // solid white
-          padding: "3rem 2.5rem",     // px-10 py-12 equivalent
-          gap: "1.5rem",              // even spacing
-          boxShadow: "0 8px 30px rgba(0,0,0,0.15)", // deep shadow
-        }}
-      >
-        {/* Icon */}
-        <div>
-          <AlertCircle className="w-14 h-14" style={{ color: "#f97316" }} /> 
-        </div>
-
-        {/* Title */}
-        <h2 className="text-2xl font-bold text-slate-900">
-          Please See the Front Desk
-        </h2>
-
-        {/* Description */}
-        <p className="text-base leading-relaxed text-slate-600 max-w-sm mx-auto">
-          We couldn’t find that badge in our system. A team member can get you set up right away.
-        </p>
-
-        {/* Countdown */}
-        <div
-          style={{
-            fontSize: "0.95rem",
-            color: "#374151", // slate-700
-            fontWeight: 500,
-          }}
-        >
-          Auto closing in {dismissIn}s
-        </div>
-
-        {/* Button */}
-        <button
-          onClick={closeBadgeError}
-          style={{
-            width: "100%",
-            height: "3rem",
-            borderRadius: "9999px",
-            backgroundColor: "#2563eb", // solid blue
-            color: "#fff",
-            fontSize: "1rem",
-            fontWeight: 600,
-            marginTop: "0.5rem",
-            boxShadow: "0 4px 10px rgba(0,0,0,0.2)",
-            transition: "background-color 0.2s ease, transform 0.15s ease",
-          }}
-          onMouseOver={(e) => (e.currentTarget.style.backgroundColor = "#1d4ed8")}
-          onMouseOut={(e) => (e.currentTarget.style.backgroundColor = "#2563eb")}
-        >
-          OK
-        </button>
       </motion.div>
-    </motion.div>
-  )}
-</AnimatePresence>
 
+      {/* Relink / Assistance Modal */}
+      <AnimatePresence>
+        {showRelinkModal && !showWizard && (
+          <motion.div
+            key="overlay-relink"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9999] flex items-center justify-center bg-blue-100/70 backdrop-blur-sm"
+          >
+            <motion.div
+              key="card-relink"
+              initial={{ y: 24, opacity: 0, scale: 0.98 }}
+              animate={{ y: 0, opacity: 1, scale: 1 }}
+              exit={{ y: 8, opacity: 0, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+              className="w-full max-w-lg rounded-[2rem] text-center flex flex-col items-center"
+              style={{
+                backgroundColor: '#ffffff',
+                padding: '2.5rem',
+                gap: '1.25rem',
+                boxShadow: '0 8px 30px rgba(0,0,0,0.15)',
+              }}
+            >
+              <div>
+                <AlertCircle className="w-14 h-14" style={{ color: '#f97316' }} />
+              </div>
 
+              <h2 className="text-2xl font-bold text-slate-900">Hey there!</h2>
+              <p className="text-base leading-relaxed text-slate-600 max-w-md mx-auto">
+                I see you have a membership with us. We’re taking your experience to the next level —
+                part of that requires us to <span className="font-semibold">re-link your badge</span> with your membership.
+                It’s super easy. I can walk you through it, or you can get help from our front desk. What would you like?
+              </p>
+
+              {/* Actions */}
+              <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
+                <button
+                  onClick={() => { setShowWizard(true); }}
+                  className="h-12 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition active:scale-[0.99]"
+                >
+                  Guide me
+                </button>
+                <button
+                  onClick={notifyFrontDesk}
+                  className="h-12 rounded-full bg-white border border-slate-200 text-slate-800 font-semibold hover:bg-slate-50 transition active:scale-[0.99] flex items-center justify-center gap-2"
+                >
+                  <HandHelping className="w-5 h-5 text-slate-500" />
+                  {helpNotified ? 'Front desk notified' : helpNotifying ? 'Notifying…' : 'Get help at front desk'}
+                </button>
+              </div>
+
+              {/* Footer tiny info */}
+              {!helpNotified && (
+                <div className="text-xs text-slate-500 mt-2">Auto closing in {dismissIn}s</div>
+              )}
+              {helpNotified && (
+                <div className="text-sm text-slate-600 mt-2">
+                  We’ve let the front desk know. Please see someone there.
+                </div>
+              )}
+
+              <button
+                onClick={closeRelinkModal}
+                className="mt-3 h-10 px-5 rounded-full bg-slate-900 text-white font-medium hover:opacity-90"
+              >
+                OK
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Assign Badge Wizard */}
+      <AnimatePresence>
+        {showWizard && (
+          <motion.div
+            key="overlay-wizard"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[10000] flex items-center justify-center bg-sky-100/60 backdrop-blur-sm"
+          >
+            <motion.div
+              key="card-wizard"
+              initial={{ y: 24, opacity: 0, scale: 0.98 }}
+              animate={{ y: 0, opacity: 1, scale: 1 }}
+              exit={{ y: 8, opacity: 0, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+              className="w-full max-w-2xl rounded-[2rem] bg-white p-6 md:p-8 shadow-2xl"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h3 className="text-xl md:text-2xl font-bold text-slate-900">Assign badge to your membership</h3>
+                  <p className="text-slate-600 mt-1">
+                    Type your <span className="font-semibold">first and last name</span>, pick your membership, and we’ll link badge <span className="font-mono">{pendingBadgeCode || '—'}</span>.
+                  </p>
+                </div>
+                {linkDone ? <CheckCircle2 className="w-7 h-7 text-green-600" /> : <Search className="w-7 h-7 text-slate-400" />}
+              </div>
+
+              {/* Search input */}
+              <div className="mt-5">
+                <label className="block text-sm font-medium text-slate-700 mb-1">Search name</label>
+                <div className="flex gap-2">
+                  <input
+                    value={nameQuery}
+                    onChange={(e) => setNameQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') searchCandidates(); }}
+                    placeholder="e.g., Jane Doe"
+                    className="flex-1 h-12 px-4 rounded-xl border border-slate-200 focus:outline-none focus:ring-4 focus:ring-blue-100"
+                  />
+                  <button
+                    onClick={searchCandidates}
+                    className="h-12 px-5 rounded-xl bg-blue-600 text-white font-semibold hover:bg-blue-700 active:scale-[0.99]"
+                  >
+                    {isSearching ? 'Searching…' : 'Search'}
+                  </button>
+                </div>
+                <p className="text-xs text-slate-500 mt-2">
+                  Tip: Use full name for best results. If you don’t see yourself, try a different spelling.
+                </p>
+              </div>
+
+              {/* Results */}
+              <div className="mt-5 space-y-2 max-h-64 overflow-auto pr-1">
+                {results.length === 0 && !isSearching && (
+                  <div className="text-slate-500 text-sm">No results yet — try searching your full name.</div>
+                )}
+                {results.map((u) => (
+                  <button
+                    key={u.id}
+                    onClick={() => setSelectedUser(u)}
+                    className={`w-full text-left p-3 rounded-xl border transition
+                      ${selectedUser?.id === u.id ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      {u.photoURL ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={u.photoURL} alt={u.name} className="w-10 h-10 rounded-xl object-cover" />
+                      ) : (
+                        <div className="w-10 h-10 rounded-xl bg-slate-200 grid place-items-center text-slate-600">
+                          {u.name?.[0]?.toUpperCase() || '?'}
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <div className="font-medium text-slate-900 truncate">{u.name || 'Unnamed'}</div>
+                        <div className="text-xs text-slate-500 truncate">
+                          {u.email || '—'} · {u.phone || '—'} {u.membershipType ? `· ${u.membershipType}` : ''}
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              {/* Confirm link */}
+              <div className="mt-6 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                <button
+                  disabled={!selectedUser || linking}
+                  onClick={linkBadgeToUser}
+                  className="flex-1 h-12 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {linking ? 'Linking…' : selectedUser ? `Link badge to ${selectedUser.name}` : 'Select your membership'}
+                </button>
+                <button
+                  onClick={() => { setShowWizard(false); setShowRelinkModal(true); }}
+                  className="h-12 px-5 rounded-full bg-white border border-slate-200 text-slate-800 font-semibold hover:bg-slate-50"
+                >
+                  Back
+                </button>
+                <button
+                  onClick={closeRelinkModal}
+                  className="h-12 px-5 rounded-full bg-slate-900 text-white font-semibold hover:opacity-90"
+                >
+                  Close
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
