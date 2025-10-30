@@ -58,15 +58,11 @@ export default function NovaPublicHome() {
   const db = getFirestore(app);
   const router = useRouter();
   const { refreshRoles, setCurrentUser, allUsers } = useUser();
-
-  // Kiosk identity (stable)
   const kioskId = 'front-desk-1';
 
   // Greeting / vibe
   const [greeting, setGreeting] = useState('');
-  const [phrase, setPhrase] = useState(
-    phrases[Math.floor(Math.random() * phrases.length)]
-  );
+  const [phrase, setPhrase] = useState(phrases[Math.floor(Math.random() * phrases.length)]);
 
   // Scanner buffer
   const [buf, setBuf] = useState('');
@@ -92,12 +88,8 @@ export default function NovaPublicHome() {
   const [helpNotified, setHelpNotified] = useState(false);
   const [helpNotifying, setHelpNotifying] = useState(false);
 
-  // Preload roles (cheap no-op if cached)
-  useEffect(() => {
-    refreshRoles(false);
-  }, [refreshRoles]);
+  useEffect(() => { refreshRoles(false); }, [refreshRoles]);
 
-  // Greeting
   useEffect(() => {
     const updateGreeting = () => {
       const hour = new Date().getHours();
@@ -110,10 +102,9 @@ export default function NovaPublicHome() {
     return () => clearInterval(id);
   }, []);
 
-  // Global key buffer
+  // Scanner key buffer
   useEffect(() => {
     const onKey = (e) => {
-      // pause live scanning while dialogs are active
       if (showRelinkModal || showWizard) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const k = e.key ?? '';
@@ -135,13 +126,12 @@ export default function NovaPublicHome() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [buf, showRelinkModal, showWizard]);
 
-  // Idle auto-commit (typical barcode wedge gap)
+  // Idle auto-commit
   useEffect(() => {
     if (!buf || showRelinkModal || showWizard) return;
     const elapsed = Date.now() - lastKeyAt;
     if (buf.length >= 5 && elapsed > 140) {
-      commitScan(buf.slice(0, 5));
-      return;
+      commitScan(buf.slice(0, 5)); return;
     }
     const t = setTimeout(() => {
       const gap = Date.now() - lastKeyAt;
@@ -186,7 +176,6 @@ export default function NovaPublicHome() {
       const asString = String(badgeCode);
       const asNumber = Number(badgeCode);
 
-      // Try multiple fields + types
       const fields = ['badge.id', 'badge.badgeNumber'];
       let hit = null;
 
@@ -195,26 +184,16 @@ export default function NovaPublicHome() {
           try {
             const qs = query(usersCol, where(field, '==', val), fsLimit(1));
             const snap = await getDocs(qs);
-            if (!snap.empty) {
-              hit = snap.docs[0];
-              break;
-            }
-          } catch (e) {
-            console.warn(`Lookup failed on ${field} == ${val}`, e);
-          }
+            if (!snap.empty) { hit = snap.docs[0]; break; }
+          } catch (e) { console.warn(`Lookup failed on ${field} == ${val}`, e); }
         }
         if (hit) break;
       }
 
       if (!hit) {
-        // NO MATCH → record scan, open relink modal
         const ref = await addDoc(collection(db, 'scans'), {
-          badgeCode,
-          matchedUserId: null,
-          user: null,
-          status: 'not_found',
-          createdAt: serverTimestamp(),
-          kioskId,
+          badgeCode, matchedUserId: null, user: null, status: 'not_found',
+          createdAt: serverTimestamp(), kioskId,
         });
         setPendingScanId(ref.id);
         setPendingBadgeCode(badgeCode);
@@ -222,21 +201,12 @@ export default function NovaPublicHome() {
         return;
       }
 
-      // MATCH → record + continue to check-in
       const data = hit.data() || {};
-      const matchedUser = {
-        id: hit.id,
-        name: data.fullName || data.name || '',
-        photoURL: data.photoURL || null,
-      };
+      const matchedUser = { id: hit.id, name: data.fullName || data.name || '', photoURL: data.photoURL || null };
 
       await addDoc(collection(db, 'scans'), {
-        badgeCode,
-        matchedUserId: hit.id,
-        user: matchedUser,
-        status: 'matched',
-        createdAt: serverTimestamp(),
-        kioskId,
+        badgeCode, matchedUserId: hit.id, user: matchedUser, status: 'matched',
+        createdAt: serverTimestamp(), kioskId,
       });
 
       const scanned = { id: hit.id, ...data };
@@ -247,24 +217,19 @@ export default function NovaPublicHome() {
       console.error('Scan lookup error:', err);
       try {
         const ref = await addDoc(collection(db, 'scans'), {
-          badgeCode: clamp5(code) || null,
-          matchedUserId: null,
-          user: null,
-          status: 'error',
-          errorMessage: String(err?.message || err),
-          createdAt: serverTimestamp(),
-          kioskId,
+          badgeCode: clamp5(code) || null, matchedUserId: null, user: null,
+          status: 'error', errorMessage: String(err?.message || err),
+          createdAt: serverTimestamp(), kioskId,
         });
         setPendingScanId(ref.id);
         setPendingBadgeCode(clamp5(code));
       } catch (_) {}
-      // Fall back to relink screen with friendly copy
       openRelinkModal();
     }
   };
 
   // —————————————————————————————————————————————
-  // RELINK MODAL HELPERS & LOGGING
+  // RELINK / WIZARD HELPERS
   // —————————————————————————————————————————————
   function openRelinkModal() {
     setDismissIn(7);
@@ -281,38 +246,25 @@ export default function NovaPublicHome() {
     resetBuffer();
   }
 
-  // Auto-dismiss only if user hasn't engaged
   useEffect(() => {
     if (!showRelinkModal || showWizard) return;
-    if (dismissIn <= 0) {
-      closeRelinkModal();
-      return;
-    }
+    if (dismissIn <= 0) { closeRelinkModal(); return; }
     const id = setTimeout(() => setDismissIn((s) => s - 1), 1000);
     return () => clearTimeout(id);
   }, [showRelinkModal, showWizard, dismissIn]);
 
-  // —————————————————————————————————————————————
-  // FRONT DESK HELP (logs for Sessions)
-  // —————————————————————————————————————————————
   const notifyFrontDesk = async () => {
     if (helpNotified || helpNotifying) return;
     setHelpNotifying(true);
     try {
       if (pendingScanId) {
         await updateDoc(doc(db, 'scans', pendingScanId), {
-          flowChoice: 'help',
-          flowChosenAt: serverTimestamp(),
-          status: 'relink_help_requested',
+          flowChoice: 'help', flowChosenAt: serverTimestamp(), status: 'relink_help_requested',
         });
       }
       await addDoc(collection(db, 'assistanceRequests'), {
-        type: 'badge_relink',
-        kioskId,
-        badgeCode: pendingBadgeCode || null,
-        scanId: pendingScanId || null,
-        status: 'open',
-        createdAt: serverTimestamp(),
+        type: 'badge_relink', kioskId, badgeCode: pendingBadgeCode || null,
+        scanId: pendingScanId || null, status: 'open', createdAt: serverTimestamp(),
       });
       setHelpNotified(true);
     } catch (e) {
@@ -323,26 +275,19 @@ export default function NovaPublicHome() {
     }
   };
 
-  // —————————————————————————————————————————————
-  // SELF-SERVE WIZARD (USES PREFETCHED USERS)
-  // —————————————————————————————————————————————
   const openWizard = async () => {
     try {
       if (pendingScanId) {
         await updateDoc(doc(db, 'scans', pendingScanId), {
-          flowChoice: 'self_serve',
-          flowChosenAt: serverTimestamp(),
-          status: 'relink_self_selected',
+          flowChoice: 'self_serve', flowChosenAt: serverTimestamp(), status: 'relink_self_selected',
         });
       }
-    } catch (e) {
-      console.warn('Could not mark flow choice on scan:', e);
-    }
+    } catch (e) { console.warn('Could not mark flow choice on scan:', e); }
     setShowWizard(true);
   };
 
-  const allUsersIndexed = useMemo(() => {
-    return (allUsers || []).map((u) => ({
+  const allUsersIndexed = useMemo(
+    () => (allUsers || []).map((u) => ({
       id: u.id,
       name: u.fullName || u.name || '',
       nameNorm: normalize(u.fullName || u.name || ''),
@@ -351,37 +296,28 @@ export default function NovaPublicHome() {
       phone: u.phone || u.phoneNumber || '',
       membershipType: u.membershipType || u.membership || '',
       photoURL: u.photoURL || null,
-    }));
-  }, [allUsers]);
+    })),
+    [allUsers]
+  );
 
   const searchCandidates = async () => {
     const qRaw = (nameQuery || '').trim();
     const q = normalize(qRaw);
     setIsSearching(true);
     try {
-      if (!q || q.length < 2) {
-        setResults([]);
-        return;
-      }
-
-      const starts = [];
-      const contains = [];
+      if (!q || q.length < 2) { setResults([]); return; }
+      const starts = [], contains = [];
       for (const u of allUsersIndexed) {
         if (!u.nameNorm && !u.emailNorm) continue;
         const nameStarts = u.nameNorm.split(' ').some((w) => w.startsWith(q));
         const emailStarts = u.emailNorm.startsWith(q);
         const nameContains = u.nameNorm.includes(q);
         const emailContains = u.emailNorm.includes(q);
-
         if (nameStarts || emailStarts) starts.push(u);
         else if (nameContains || emailContains) contains.push(u);
       }
-
-      const merged = [...starts, ...contains].slice(0, 20);
-      setResults(merged);
-    } finally {
-      setIsSearching(false);
-    }
+      setResults([...starts, ...contains].slice(0, 20));
+    } finally { setIsSearching(false); }
   };
 
   const linkBadgeToUser = async () => {
@@ -401,11 +337,7 @@ export default function NovaPublicHome() {
       if (pendingScanId) {
         await updateDoc(doc(db, 'scans', pendingScanId), {
           matchedUserId: selectedUser.id,
-          user: {
-            id: selectedUser.id,
-            name: selectedUser.name,
-            photoURL: selectedUser.photoURL || null,
-          },
+          user: { id: selectedUser.id, name: selectedUser.name, photoURL: selectedUser.photoURL || null },
           status: 'relinked',
           relinkedAt: serverTimestamp(),
         });
@@ -413,11 +345,7 @@ export default function NovaPublicHome() {
         await addDoc(collection(db, 'scans'), {
           badgeCode: pendingBadgeCode,
           matchedUserId: selectedUser.id,
-          user: {
-            id: selectedUser.id,
-            name: selectedUser.name,
-            photoURL: selectedUser.photoURL || null,
-          },
+          user: { id: selectedUser.id, name: selectedUser.name, photoURL: selectedUser.photoURL || null },
           status: 'relinked',
           createdAt: serverTimestamp(),
           kioskId,
@@ -433,9 +361,7 @@ export default function NovaPublicHome() {
     } catch (e) {
       console.error('Badge link error:', e);
       alert('We hit a snag linking that badge. Please try again or ask the front desk.');
-    } finally {
-      setLinking(false);
-    }
+    } finally { setLinking(false); }
   };
 
   // —————————————————————————————————————————————
@@ -446,11 +372,11 @@ export default function NovaPublicHome() {
       {/* Main grid centered vertically */}
       <div className="max-w-7xl mx-auto px-6 py-10 min-h-screen flex items-center">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 w-full items-stretch">
-          {/* LEFT: Full-bleed scanner zone */}
-          <section className="relative rounded-[2rem] overflow-hidden min-h-[600px] border border-slate-200 bg-gradient-to-b from-white/70 via-sky-50/60 to-white">
-            {/* Header copy */}
-            <div className="p-8 md:p-10">
-              <div className="text-3xl md:text-4xl font-bold">{greeting}</div>
+          {/* LEFT: Scanner zone (no clipping; arrow sits inside) */}
+          <section className="relative rounded-[2rem] overflow-hidden min-h-[620px] border border-slate-200 bg-gradient-to-b from-white/70 via-sky-50/60 to-white">
+            {/* Top content */}
+            <div className="px-8 md:px-10 pt-8">
+              <h2 className="text-3xl md:text-4xl font-extrabold gradient-text">{greeting}</h2>
               <p className="text-slate-500 mt-1">{phrase}</p>
 
               <div className="mt-6 max-w-xl">
@@ -463,59 +389,54 @@ export default function NovaPublicHome() {
               </div>
             </div>
 
-            {/* BIG bouncing arrow & cue near bottom; anchored at 25% of container width */}
-            <div className="pointer-events-none absolute inset-x-0" style={{ bottom: 90 }}>
-              <div className="relative w-full">
-                <div className="absolute" style={{ left: 'calc(25% - 24px)' }}>
-                  <motion.div
-                    initial={{ y: 0 }}
-                    animate={{ y: [0, 20, 0] }}
-                    transition={{ repeat: Infinity, duration: 1.6, ease: 'easeInOut' }}
-                    className="flex flex-col items-center"
-                  >
-                    <div className="rounded-full bg-blue-600 text-white shadow-lg px-4 py-2 text-base md:text-lg font-semibold mb-3">
-                      Scan here
-                    </div>
-                    <ArrowDown className="w-16 h-16 md:w-20 md:h-20 text-blue-600 drop-shadow" strokeWidth={2.4} />
-                  </motion.div>
-                </div>
-              </div>
+            {/* Middle feedback glyph: centered between copy and bottom */}
+            <div className="absolute left-0 right-0 flex justify-center"
+                 style={{ top: '48%', transform: 'translateY(-50%)' }}>
+              <motion.div
+                animate={{ scale: isReading ? [1, 1.08, 1] : 1, opacity: isReading ? [0.5, 1, 0.5] : 0.35 }}
+                transition={{ repeat: isReading ? Infinity : 0, duration: 1.6, ease: 'easeInOut' }}
+              >
+                <ScanLine className="text-slate-700" style={{ width: 72, height: 72 }} strokeWidth={1.8} />
+              </motion.div>
             </div>
 
-            {/* Invisible pad hit-area (lets you click to commit buffer during dev) */}
+            {/* BIG arrow & "Scan here" — inside the panel bottom-left */}
+            <div className="absolute z-10 left-7 bottom-6 pointer-events-none">
+              <motion.div
+                initial={{ y: 0 }}
+                animate={{ y: [0, 18, 0] }}
+                transition={{ repeat: Infinity, duration: 1.5, ease: 'easeInOut' }}
+                className="flex flex-col items-start"
+              >
+                <div className="rounded-full bg-blue-600 text-white shadow-lg px-5 py-2 text-base md:text-lg font-semibold mb-2">
+                  Scan here
+                </div>
+                <ArrowDown className="w-16 h-16 md:w-20 md:h-20 text-blue-600 drop-shadow" strokeWidth={2.4} />
+              </motion.div>
+            </div>
+
+            {/* Invisible hit-area for dev testing */}
             <button
               onClick={clickToTest}
               aria-label="Test commit scan"
               className="absolute"
               style={{
-                left: 'calc(25% - 110px)',
-                bottom: 6,
-                width: 220,
-                height: 110,
+                left: 16,
+                bottom: 8,
+                width: 260,
+                height: 120,
                 background: 'transparent',
               }}
             />
-
-            {/* (Removed the “Ready/Reading” pill to keep the area clean) */}
-
-            {/* Subtle center glyph pulsing when keys stream in (keeps feedback without copy) */}
-            <div className="absolute inset-0 grid place-items-center pointer-events-none">
-              <motion.div
-                animate={{ scale: isReading ? [1, 1.06, 1] : 1, opacity: isReading ? [0.6, 1, 0.6] : 0.3 }}
-                transition={{ repeat: isReading ? Infinity : 0, duration: 1.6, ease: 'easeInOut' }}
-              >
-                <ScanLine className="text-slate-700" style={{ width: 64, height: 64 }} strokeWidth={1.8} />
-              </motion.div>
-            </div>
           </section>
 
-          {/* RIGHT: Quick Actions only */}
-          <aside className="flex flex-col gap-6">
-            <div className="px-1 text-sm font-semibold tracking-wide text-slate-500 uppercase">
+          {/* RIGHT: Quick Actions — centered vertically */}
+          <aside className="flex flex-col items-stretch justify-center">
+            <div className="px-1 text-sm font-semibold tracking-wide text-slate-500 uppercase text-center">
               Quick Actions
             </div>
 
-            <div className="grid grid-cols-2 gap-5">
+            <div className="grid grid-cols-2 gap-5 mt-3">
               <DashCard
                 title="About"
                 subtitle="How it works, safety, studios"
@@ -552,7 +473,7 @@ export default function NovaPublicHome() {
 
             <Link
               href="/signup"
-              className="group w-full rounded-[1.4rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-xl focus:outline-none focus:ring-4 focus:ring-blue-200"
+              className="group w-full mt-6 rounded-[1.4rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-xl focus:outline-none focus:ring-4 focus:ring-blue-200"
             >
               <div className="w-full h-16 rounded-[1.25rem] bg-white/85 backdrop-blur grid place-items-center">
                 <div className="flex items-center gap-2 font-semibold text-blue-700 group-hover:text-blue-800">
@@ -562,7 +483,7 @@ export default function NovaPublicHome() {
               </div>
             </Link>
 
-            <div className="text-xs text-slate-500 text-center">
+            <div className="text-xs text-slate-500 text-center mt-3">
               Prefer help? The front desk is happy to assist with anything.
             </div>
           </aside>
@@ -591,30 +512,18 @@ export default function NovaPublicHome() {
               exit={{ y: 8, opacity: 0, scale: 0.98 }}
               transition={{ type: 'spring', stiffness: 300, damping: 28 }}
               className="w-full max-w-lg rounded-[2rem] text-center flex flex-col items-center"
-              style={{
-                backgroundColor: '#ffffff',
-                padding: '2.5rem',
-                gap: '1.25rem',
-                boxShadow: '0 8px 30px rgba(0,0,0,0.15)',
-              }}
+              style={{ backgroundColor: '#ffffff', padding: '2.5rem', gap: '1.25rem', boxShadow: '0 8px 30px rgba(0,0,0,0.15)' }}
             >
-              <div>
-                <AlertCircle className="w-14 h-14" style={{ color: '#f97316' }} />
-              </div>
-
+              <div><AlertCircle className="w-14 h-14" style={{ color: '#f97316' }} /></div>
               <h2 className="text-2xl font-bold text-slate-900">Hey there!</h2>
               <p className="text-base leading-relaxed text-slate-600 max-w-md mx-auto">
                 I see you have a membership with us. We’re taking your experience to the next
                 level — part of that requires us to <span className="font-semibold">re-link your badge</span> with your
-                membership. It’s super easy. I can walk you through it, or you can get help
-                from our front desk. What would you like?
+                membership. It’s super easy. I can walk you through it, or you can get help from our front desk. What would you like?
               </p>
 
               <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
-                <button
-                  onClick={openWizard}
-                  className="h-12 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition active:scale-[0.99]"
-                >
+                <button onClick={openWizard} className="h-12 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition active:scale-[0.99]">
                   Guide me
                 </button>
                 <button
@@ -627,14 +536,9 @@ export default function NovaPublicHome() {
               </div>
 
               {!helpNotified && <div className="text-xs text-slate-500 mt-2">Auto closing in {dismissIn}s</div>}
-              {helpNotified && (
-                <div className="text-sm text-slate-600 mt-2">We’ve let the front desk know. Please see someone there.</div>
-              )}
+              {helpNotified && <div className="text-sm text-slate-600 mt-2">We’ve let the front desk know. Please see someone there.</div>}
 
-              <button
-                onClick={closeRelinkModal}
-                className="mt-3 h-10 px-5 rounded-full bg-slate-900 text-white font-medium hover:opacity-90"
-              >
+              <button onClick={closeRelinkModal} className="mt-3 h-10 px-5 rounded-full bg-slate-900 text-white font-medium hover:opacity-90">
                 OK
               </button>
             </motion.div>
@@ -678,9 +582,7 @@ export default function NovaPublicHome() {
                   <input
                     value={nameQuery}
                     onChange={(e) => setNameQuery(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') searchCandidates();
-                    }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') searchCandidates(); }}
                     placeholder="e.g., Jane Doe"
                     className="flex-1 h-12 px-4 rounded-xl border border-slate-200 focus:outline-none focus:ring-4 focus:ring-blue-100"
                   />
@@ -691,31 +593,21 @@ export default function NovaPublicHome() {
                     {isSearching ? 'Searching…' : 'Search'}
                   </button>
                 </div>
-                <p className="text-xs text-slate-500 mt-2">
-                  Tip: Use full name for best results. If you don’t see yourself, try a different spelling.
-                </p>
+                <p className="text-xs text-slate-500 mt-2">Tip: Use full name for best results. If you don’t see yourself, try a different spelling.</p>
               </div>
 
-              {/* Results (from prefetched users) */}
+              {/* Results */}
               <div className="mt-5 space-y-2 max-h-64 overflow-auto pr-1">
-                {results.length === 0 && !isSearching && (
-                  <div className="text-slate-500 text-sm">No results yet — try searching your full name.</div>
-                )}
+                {results.length === 0 && !isSearching && <div className="text-slate-500 text-sm">No results yet — try searching your full name.</div>}
                 {results.map((u) => (
                   <button
                     key={u.id}
                     onClick={() => setSelectedUser(u)}
-                    className={`w-full text-left p-3 rounded-xl border transition ${
-                      selectedUser?.id === u.id ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'
-                    }`}
+                    className={`w-full text-left p-3 rounded-xl border transition ${selectedUser?.id === u.id ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'}`}
                   >
                     <div className="flex items-center gap-3">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={u.photoURL || '/default-avatar.png'}
-                        alt={u.name}
-                        className="w-10 h-10 rounded-xl object-cover"
-                      />
+                      <img src={u.photoURL || '/default-avatar.png'} alt={u.name} className="w-10 h-10 rounded-xl object-cover" />
                       <div className="min-w-0">
                         <div className="font-medium text-slate-900 truncate">{u.name || 'Unnamed'}</div>
                         <div className="text-xs text-slate-500 truncate">
@@ -734,17 +626,10 @@ export default function NovaPublicHome() {
                   onClick={linkBadgeToUser}
                   className="flex-1 h-12 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {linking
-                    ? 'Linking…'
-                    : selectedUser
-                    ? `Link badge to ${selectedUser.name}`
-                    : 'Select your membership'}
+                  {linking ? 'Linking…' : selectedUser ? `Link badge to ${selectedUser.name}` : 'Select your membership'}
                 </button>
                 <button
-                  onClick={() => {
-                    setShowWizard(false);
-                    setShowRelinkModal(true);
-                  }}
+                  onClick={() => { setShowWizard(false); setShowRelinkModal(true); }}
                   className="h-12 px-5 rounded-full bg-white border border-slate-200 text-slate-800 font-semibold hover:bg-slate-50"
                 >
                   Back
@@ -760,6 +645,23 @@ export default function NovaPublicHome() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Animated gradient text CSS */}
+      <style jsx global>{`
+        .gradient-text {
+          background: linear-gradient(90deg, #1d4ed8, #22d3ee, #1d4ed8);
+          -webkit-background-clip: text;
+          background-clip: text;
+          color: transparent;
+          background-size: 200% 100%;
+          animation: gc-shimmer 3s ease-in-out infinite;
+        }
+        @keyframes gc-shimmer {
+          0% { background-position: 0% 50%; }
+          50% { background-position: 100% 50%; }
+          100% { background-position: 0% 50%; }
+        }
+      `}</style>
     </div>
   );
 }
