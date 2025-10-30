@@ -5,7 +5,14 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ScanLine, UserPlus, AlertCircle, HandHelping, Search, CheckCircle2 } from 'lucide-react';
+import {
+  ScanLine,
+  UserPlus,
+  AlertCircle,
+  HandHelping,
+  Search,
+  CheckCircle2,
+} from 'lucide-react';
 import {
   getFirestore,
   collection,
@@ -23,11 +30,23 @@ import { app } from './lib/firebase';
 import CornerUtilities from './components/CornerUtilities';
 import { useUser } from './context/UserContext';
 
+// —————————————————————————————————————————————
 // Helpers
 const digitsOnly = (s) => (s.match(/\d+/g)?.join('') ?? '');
 const clamp5 = (s) => digitsOnly(s).slice(0, 5);
+const nameLowerMatch = (lowered, q) =>
+  lowered.includes(q) || lowered.split(' ').some((w) => w.startsWith(q));
+
+// —————————————————————————————————————————————
 
 export default function NovaPublicHome() {
+  const db = getFirestore(app);
+  const router = useRouter();
+  const { refreshRoles, setCurrentUser } = useUser();
+
+  // Kiosk identity (stable)
+  const kioskId = 'front-desk-1';
+
   // Greeting
   const [greeting, setGreeting] = useState('');
 
@@ -36,12 +55,13 @@ export default function NovaPublicHome() {
   const [lastKeyAt, setLastKeyAt] = useState(0);
   const [isReading, setIsReading] = useState(false);
 
-  // Not-found → relink flow modal
+  // Relink flow state
   const [showRelinkModal, setShowRelinkModal] = useState(false);
   const [pendingBadgeCode, setPendingBadgeCode] = useState('');
+  const [pendingScanId, setPendingScanId] = useState(null); // <- the not_found scan doc id
   const [dismissIn, setDismissIn] = useState(7);
 
-  // Relink wizard (self-serve)
+  // Self-serve wizard
   const [showWizard, setShowWizard] = useState(false);
   const [nameQuery, setNameQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -54,12 +74,10 @@ export default function NovaPublicHome() {
   const [helpNotified, setHelpNotified] = useState(false);
   const [helpNotifying, setHelpNotifying] = useState(false);
 
-  const { refreshRoles, setCurrentUser } = useUser();
-  const router = useRouter();
-  const db = getFirestore(app);
-  const kioskId = 'front-desk-1';
-
-  useEffect(() => { refreshRoles(false); }, [refreshRoles]);
+  // Preload roles (cheap no-op if cached)
+  useEffect(() => {
+    refreshRoles(false);
+  }, [refreshRoles]);
 
   // Time / Greeting
   useEffect(() => {
@@ -77,7 +95,7 @@ export default function NovaPublicHome() {
   // Global key buffer
   useEffect(() => {
     const onKey = (e) => {
-      // pause scanner while modals are open
+      // pause live scanning while dialogs are active
       if (showRelinkModal || showWizard) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const k = e.key ?? '';
@@ -99,7 +117,7 @@ export default function NovaPublicHome() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [buf, showRelinkModal, showWizard]);
 
-  // Idle auto-commit
+  // Idle auto-commit (typical barcode wedge gap)
   useEffect(() => {
     if (!buf || showRelinkModal || showWizard) return;
     const elapsed = Date.now() - lastKeyAt;
@@ -138,7 +156,9 @@ export default function NovaPublicHome() {
     if (buf.length === 5) return commitScan(buf);
   };
 
+  // —————————————————————————————————————————————
   // MAIN SCAN HANDLER
+  // —————————————————————————————————————————————
   const handleScan = async (code) => {
     try {
       const badgeCode = clamp5(code);
@@ -157,7 +177,10 @@ export default function NovaPublicHome() {
           try {
             const qs = query(usersCol, where(field, '==', val), fsLimit(1));
             const snap = await getDocs(qs);
-            if (!snap.empty) { hit = snap.docs[0]; break; }
+            if (!snap.empty) {
+              hit = snap.docs[0];
+              break;
+            }
           } catch (e) {
             console.warn(`Lookup failed on ${field} == ${val}`, e);
           }
@@ -166,8 +189,8 @@ export default function NovaPublicHome() {
       }
 
       if (!hit) {
-        // NO MATCH → open relink UX instead of generic error
-        await addDoc(collection(db, 'scans'), {
+        // NO MATCH → record scan, open relink modal
+        const ref = await addDoc(collection(db, 'scans'), {
           badgeCode,
           matchedUserId: null,
           user: null,
@@ -175,12 +198,13 @@ export default function NovaPublicHome() {
           createdAt: serverTimestamp(),
           kioskId,
         });
+        setPendingScanId(ref.id);
         setPendingBadgeCode(badgeCode);
         openRelinkModal();
         return;
       }
 
-      // MATCH → proceed to check-in as before
+      // MATCH → record + continue to check-in
       const data = hit.data() || {};
       const matchedUser = {
         id: hit.id,
@@ -204,7 +228,7 @@ export default function NovaPublicHome() {
     } catch (err) {
       console.error('Scan lookup error:', err);
       try {
-        await addDoc(collection(db, 'scans'), {
+        const ref = await addDoc(collection(db, 'scans'), {
           badgeCode: clamp5(code) || null,
           matchedUserId: null,
           user: null,
@@ -213,14 +237,17 @@ export default function NovaPublicHome() {
           createdAt: serverTimestamp(),
           kioskId,
         });
+        setPendingScanId(ref.id);
+        setPendingBadgeCode(clamp5(code));
       } catch (_) {}
       // Fall back to relink screen with friendly copy
-      setPendingBadgeCode(clamp5(code));
       openRelinkModal();
     }
   };
 
-  // Relink modal helpers
+  // —————————————————————————————————————————————
+  // RELINK MODAL HELPERS & LOGGING
+  // —————————————————————————————————————————————
   function openRelinkModal() {
     setDismissIn(7);
     setHelpNotified(false);
@@ -236,7 +263,7 @@ export default function NovaPublicHome() {
     resetBuffer();
   }
 
-  // Auto-dismiss when idle IF user doesn’t interact (only if they haven’t chosen a path)
+  // Auto-dismiss only if user hasn't engaged
   useEffect(() => {
     if (!showRelinkModal || showWizard) return;
     if (dismissIn <= 0) {
@@ -247,7 +274,57 @@ export default function NovaPublicHome() {
     return () => clearTimeout(id);
   }, [showRelinkModal, showWizard, dismissIn]);
 
-  // ---------- Self-Serve: Search & Link ----------
+  // —————————————————————————————————————————————
+  // FRONT DESK HELP (logs for Sessions)
+  // —————————————————————————————————————————————
+  const notifyFrontDesk = async () => {
+    if (helpNotified || helpNotifying) return;
+    setHelpNotifying(true);
+    try {
+      // mark the original scan with the choice
+      if (pendingScanId) {
+        await updateDoc(doc(db, 'scans', pendingScanId), {
+          flowChoice: 'help',
+          flowChosenAt: serverTimestamp(),
+          status: 'relink_help_requested',
+        });
+      }
+      // create an assistance request document
+      await addDoc(collection(db, 'assistanceRequests'), {
+        type: 'badge_relink',
+        kioskId,
+        badgeCode: pendingBadgeCode || null,
+        scanId: pendingScanId || null,
+        status: 'open',
+        createdAt: serverTimestamp(),
+      });
+      setHelpNotified(true);
+    } catch (e) {
+      console.error('Notify front desk error:', e);
+      alert('Could not notify the front desk. Please walk over for assistance.');
+    } finally {
+      setHelpNotifying(false);
+    }
+  };
+
+  // —————————————————————————————————————————————
+  // SELF-SERVE WIZARD (logs for Sessions)
+  // —————————————————————————————————————————————
+  const openWizard = async () => {
+    try {
+      if (pendingScanId) {
+        await updateDoc(doc(db, 'scans', pendingScanId), {
+          flowChoice: 'self_serve',
+          flowChosenAt: serverTimestamp(),
+          status: 'relink_self_selected',
+        });
+      }
+    } catch (e) {
+      console.warn('Could not mark flow choice on scan:', e);
+    }
+    setShowWizard(true);
+  };
+
   const searchCandidates = async () => {
     const q = (nameQuery || '').trim().toLowerCase();
     if (!q || q.length < 2) {
@@ -257,9 +334,7 @@ export default function NovaPublicHome() {
     setIsSearching(true);
 
     try {
-      // Preferred: denormalized field "nameLower" to support range query
-      // If your users have "nameLower", this is efficient & indexable.
-      // Otherwise, we fall back to a broader fetch + client filter.
+      // Prefer indexed nameLower range; fallback to small page scan
       const usersCol = collection(db, 'users');
       let snap;
       try {
@@ -267,13 +342,11 @@ export default function NovaPublicHome() {
           usersCol,
           where('nameLower', '>=', q),
           where('nameLower', '<=', q + '\uf8ff'),
-          fsLimit(10)
+          fsLimit(20)
         );
         snap = await getDocs(qs);
       } catch {
-        // Fallback: pull a small page and filter client-side
-        // (Consider replacing with Algolia/CF for production-scale search)
-        const qs = query(usersCol, fsLimit(25));
+        const qs = query(usersCol, fsLimit(40));
         snap = await getDocs(qs);
       }
 
@@ -284,7 +357,7 @@ export default function NovaPublicHome() {
         const email = data.email || '';
         const phone = data.phone || data.phoneNumber || '';
         const lowered = (name || '').toLowerCase();
-        if (!lowered || (nameLowerMatch(lowered, q) || email.toLowerCase().includes(q))) {
+        if (!lowered || nameLowerMatch(lowered, q) || email.toLowerCase().includes(q)) {
           items.push({
             id: d.id,
             name,
@@ -295,15 +368,10 @@ export default function NovaPublicHome() {
           });
         }
       });
-      setResults(items.slice(0, 10));
+      setResults(items.slice(0, 12));
     } finally {
       setIsSearching(false);
     }
-  };
-
-  const nameLowerMatch = (lowered, q) => {
-    // simple contains or word-start check
-    return lowered.includes(q) || lowered.split(' ').some((w) => w.startsWith(q));
   };
 
   const linkBadgeToUser = async () => {
@@ -320,13 +388,40 @@ export default function NovaPublicHome() {
         },
       });
 
-      // Store locally + route to /checkin
+      // mark the original not_found scan as relinked + who we matched
+      if (pendingScanId) {
+        await updateDoc(doc(db, 'scans', pendingScanId), {
+          matchedUserId: selectedUser.id,
+          user: {
+            id: selectedUser.id,
+            name: selectedUser.name || '',
+            photoURL: selectedUser.photoURL || null,
+          },
+          status: 'relinked',
+          relinkedAt: serverTimestamp(),
+        });
+      } else {
+        // if no prior scan id (edge), at least log a new scan record
+        await addDoc(collection(db, 'scans'), {
+          badgeCode: pendingBadgeCode,
+          matchedUserId: selectedUser.id,
+          user: {
+            id: selectedUser.id,
+            name: selectedUser.name || '',
+            photoURL: selectedUser.photoURL || null,
+          },
+          status: 'relinked',
+          createdAt: serverTimestamp(),
+          kioskId,
+        });
+      }
+
+      // Store locally and continue to check-in
       const enriched = { ...selectedUser, badge: { id: String(pendingBadgeCode) } };
       localStorage.setItem('nova-user', JSON.stringify(enriched));
       setCurrentUser(enriched);
 
       setLinkDone(true);
-      // graceful micro-delay for success state
       setTimeout(() => router.replace('/checkin'), 700);
     } catch (e) {
       console.error('Badge link error:', e);
@@ -336,27 +431,9 @@ export default function NovaPublicHome() {
     }
   };
 
-  // ---------- Front Desk Help ----------
-  const notifyFrontDesk = async () => {
-    if (helpNotified || helpNotifying) return;
-    setHelpNotifying(true);
-    try {
-      await addDoc(collection(db, 'assistanceRequests'), {
-        type: 'badge_relink',
-        kioskId,
-        badgeCode: pendingBadgeCode || null,
-        status: 'open',
-        createdAt: serverTimestamp(),
-      });
-      setHelpNotified(true);
-    } catch (e) {
-      console.error('Notify front desk error:', e);
-      alert('Could not notify the front desk. Please walk over for assistance.');
-    } finally {
-      setHelpNotifying(false);
-    }
-  };
-
+  // —————————————————————————————————————————————
+  // UI
+  // —————————————————————————————————————————————
   return (
     <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white flex flex-col items-center justify-center text-slate-900">
       <CornerUtilities />
@@ -380,7 +457,6 @@ export default function NovaPublicHome() {
             Scan your badge to begin
           </div>
 
-          {/* Large scan icon */}
           <div className="relative grid place-items-center mt-2">
             <motion.span
               aria-hidden
@@ -411,11 +487,13 @@ export default function NovaPublicHome() {
             <div className="w-full border-t border-slate-200" />
           </div>
           <div className="relative flex justify-center">
-            <span className="px-4 bg-white text-slate-400 text-sm font-medium tracking-wide">OR</span>
+            <span className="px-4 bg-white text-slate-400 text-sm font-medium tracking-wide">
+              OR
+            </span>
           </div>
         </div>
 
-        {/* Prominent New Member CTA */}
+        {/* Prominent new member CTA */}
         <Link
           href="/signup"
           className="group w-full max-w-sm rounded-[1.25rem] p-[2px] bg-gradient-to-tr from-blue-600 via-blue-500 to-sky-400 hover:via-blue-600 transition-shadow shadow-lg"
@@ -429,7 +507,7 @@ export default function NovaPublicHome() {
         </Link>
       </motion.div>
 
-      {/* Relink / Assistance Modal */}
+      {/* Relink / Assistance modal */}
       <AnimatePresence>
         {showRelinkModal && !showWizard && (
           <motion.div
@@ -467,7 +545,7 @@ export default function NovaPublicHome() {
               {/* Actions */}
               <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
                 <button
-                  onClick={() => { setShowWizard(true); }}
+                  onClick={openWizard}
                   className="h-12 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition active:scale-[0.99]"
                 >
                   Guide me
@@ -481,7 +559,6 @@ export default function NovaPublicHome() {
                 </button>
               </div>
 
-              {/* Footer tiny info */}
               {!helpNotified && (
                 <div className="text-xs text-slate-500 mt-2">Auto closing in {dismissIn}s</div>
               )}
@@ -502,7 +579,7 @@ export default function NovaPublicHome() {
         )}
       </AnimatePresence>
 
-      {/* Assign Badge Wizard */}
+      {/* Self-serve: Assign Badge Wizard */}
       <AnimatePresence>
         {showWizard && (
           <motion.div
@@ -524,10 +601,15 @@ export default function NovaPublicHome() {
                 <div>
                   <h3 className="text-xl md:text-2xl font-bold text-slate-900">Assign badge to your membership</h3>
                   <p className="text-slate-600 mt-1">
-                    Type your <span className="font-semibold">first and last name</span>, pick your membership, and we’ll link badge <span className="font-mono">{pendingBadgeCode || '—'}</span>.
+                    Type your <span className="font-semibold">first and last name</span>, pick your membership, and we’ll link badge{' '}
+                    <span className="font-mono">{pendingBadgeCode || '—'}</span>.
                   </p>
                 </div>
-                {linkDone ? <CheckCircle2 className="w-7 h-7 text-green-600" /> : <Search className="w-7 h-7 text-slate-400" />}
+                {linkDone ? (
+                  <CheckCircle2 className="w-7 h-7 text-green-600" />
+                ) : (
+                  <Search className="w-7 h-7 text-slate-400" />
+                )}
               </div>
 
               {/* Search input */}
@@ -537,7 +619,9 @@ export default function NovaPublicHome() {
                   <input
                     value={nameQuery}
                     onChange={(e) => setNameQuery(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') searchCandidates(); }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') searchCandidates();
+                    }}
                     placeholder="e.g., Jane Doe"
                     className="flex-1 h-12 px-4 rounded-xl border border-slate-200 focus:outline-none focus:ring-4 focus:ring-blue-100"
                   />
@@ -562,22 +646,26 @@ export default function NovaPublicHome() {
                   <button
                     key={u.id}
                     onClick={() => setSelectedUser(u)}
-                    className={`w-full text-left p-3 rounded-xl border transition
-                      ${selectedUser?.id === u.id ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'}`}
+                    className={`w-full text-left p-3 rounded-xl border transition ${
+                      selectedUser?.id === u.id
+                        ? 'border-blue-400 bg-blue-50'
+                        : 'border-slate-200 hover:bg-slate-50'
+                    }`}
                   >
                     <div className="flex items-center gap-3">
-                      {u.photoURL ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={u.photoURL} alt={u.name} className="w-10 h-10 rounded-xl object-cover" />
-                      ) : (
-                        <div className="w-10 h-10 rounded-xl bg-slate-200 grid place-items-center text-slate-600">
-                          {u.name?.[0]?.toUpperCase() || '?'}
-                        </div>
-                      )}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={u.photoURL || '/default-avatar.png'}
+                        alt={u.name}
+                        className="w-10 h-10 rounded-xl object-cover"
+                      />
                       <div className="min-w-0">
-                        <div className="font-medium text-slate-900 truncate">{u.name || 'Unnamed'}</div>
+                        <div className="font-medium text-slate-900 truncate">
+                          {u.name || 'Unnamed'}
+                        </div>
                         <div className="text-xs text-slate-500 truncate">
-                          {u.email || '—'} · {u.phone || '—'} {u.membershipType ? `· ${u.membershipType}` : ''}
+                          {u.email || '—'} · {u.phone || '—'}{' '}
+                          {u.membershipType ? `· ${u.membershipType}` : ''}
                         </div>
                       </div>
                     </div>
@@ -592,10 +680,17 @@ export default function NovaPublicHome() {
                   onClick={linkBadgeToUser}
                   className="flex-1 h-12 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {linking ? 'Linking…' : selectedUser ? `Link badge to ${selectedUser.name}` : 'Select your membership'}
+                  {linking
+                    ? 'Linking…'
+                    : selectedUser
+                    ? `Link badge to ${selectedUser.name}`
+                    : 'Select your membership'}
                 </button>
                 <button
-                  onClick={() => { setShowWizard(false); setShowRelinkModal(true); }}
+                  onClick={() => {
+                    setShowWizard(false);
+                    setShowRelinkModal(true);
+                  }}
                   className="h-12 px-5 rounded-full bg-white border border-slate-200 text-slate-800 font-semibold hover:bg-slate-50"
                 >
                   Back
