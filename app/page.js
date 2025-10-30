@@ -606,7 +606,7 @@ export default function NovaPublicHome() {
                     className={`w-full text-left p-3 rounded-xl border transition ${selectedUser?.id === u.id ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'}`}
                   >
                     <div className="flex items-center gap-3">
-                      {/* esslint-disable-next-line @next/next/no-img-element */}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img src={u.photoURL || '/default-avatar.png'} alt={u.name} className="w-10 h-10 rounded-xl object-cover" />
                       <div className="min-w-0">
                         <div className="font-medium text-slate-900 truncate">{u.name || 'Unnamed'}</div>
