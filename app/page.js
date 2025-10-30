@@ -34,15 +34,18 @@ import { useUser } from './context/UserContext';
 // Helpers
 const digitsOnly = (s) => (s.match(/\d+/g)?.join('') ?? '');
 const clamp5 = (s) => digitsOnly(s).slice(0, 5);
-const nameLowerMatch = (lowered, q) =>
-  lowered.includes(q) || lowered.split(' ').some((w) => w.startsWith(q));
+const normalize = (s) =>
+  String(s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
 
 // —————————————————————————————————————————————
 
 export default function NovaPublicHome() {
   const db = getFirestore(app);
   const router = useRouter();
-  const { refreshRoles, setCurrentUser } = useUser();
+  const { refreshRoles, setCurrentUser, allUsers } = useUser();
 
   // Kiosk identity (stable)
   const kioskId = 'front-desk-1';
@@ -58,7 +61,7 @@ export default function NovaPublicHome() {
   // Relink flow state
   const [showRelinkModal, setShowRelinkModal] = useState(false);
   const [pendingBadgeCode, setPendingBadgeCode] = useState('');
-  const [pendingScanId, setPendingScanId] = useState(null); // <- the not_found scan doc id
+  const [pendingScanId, setPendingScanId] = useState(null); // id of the not_found/error scan
   const [dismissIn, setDismissIn] = useState(7);
 
   // Self-serve wizard
@@ -308,7 +311,7 @@ export default function NovaPublicHome() {
   };
 
   // —————————————————————————————————————————————
-  // SELF-SERVE WIZARD (logs for Sessions)
+  // SELF-SERVE WIZARD (USES PREFETCHED USERS)
   // —————————————————————————————————————————————
   const openWizard = async () => {
     try {
@@ -325,50 +328,49 @@ export default function NovaPublicHome() {
     setShowWizard(true);
   };
 
-  const searchCandidates = async () => {
-    const q = (nameQuery || '').trim().toLowerCase();
-    if (!q || q.length < 2) {
-      setResults([]);
-      return;
-    }
-    setIsSearching(true);
+  const allUsersIndexed = useMemo(() => {
+    // Prepare a lightweight index for fast client search
+    return (allUsers || []).map((u) => ({
+      id: u.id,
+      name: u.fullName || u.name || '',
+      nameNorm: normalize(u.fullName || u.name || ''),
+      email: u.email || '',
+      emailNorm: normalize(u.email || ''),
+      phone: u.phone || u.phoneNumber || '',
+      membershipType: u.membershipType || u.membership || '',
+      photoURL: u.photoURL || null,
+    }));
+  }, [allUsers]);
 
+  const searchCandidates = async () => {
+    const qRaw = (nameQuery || '').trim();
+    const q = normalize(qRaw);
+    setIsSearching(true);
     try {
-      // Prefer indexed nameLower range; fallback to small page scan
-      const usersCol = collection(db, 'users');
-      let snap;
-      try {
-        const qs = query(
-          usersCol,
-          where('nameLower', '>=', q),
-          where('nameLower', '<=', q + '\uf8ff'),
-          fsLimit(20)
-        );
-        snap = await getDocs(qs);
-      } catch {
-        const qs = query(usersCol, fsLimit(40));
-        snap = await getDocs(qs);
+      if (!q || q.length < 2) {
+        setResults([]);
+        return;
       }
 
-      const items = [];
-      snap.forEach((d) => {
-        const data = d.data() || {};
-        const name = data.fullName || data.name || '';
-        const email = data.email || '';
-        const phone = data.phone || data.phoneNumber || '';
-        const lowered = (name || '').toLowerCase();
-        if (!lowered || nameLowerMatch(lowered, q) || email.toLowerCase().includes(q)) {
-          items.push({
-            id: d.id,
-            name,
-            email,
-            phone,
-            photoURL: data.photoURL || null,
-            membershipType: data.membershipType || data.membership || '',
-          });
+      // Match on name/email contains; prefer word-starts
+      const starts = [];
+      const contains = [];
+      for (const u of allUsersIndexed) {
+        if (!u.nameNorm && !u.emailNorm) continue;
+        const nameStarts = u.nameNorm.split(' ').some((w) => w.startsWith(q));
+        const emailStarts = u.emailNorm.startsWith(q);
+        const nameContains = u.nameNorm.includes(q);
+        const emailContains = u.emailNorm.includes(q);
+
+        if (nameStarts || emailStarts) {
+          starts.push(u);
+        } else if (nameContains || emailContains) {
+          contains.push(u);
         }
-      });
-      setResults(items.slice(0, 12));
+      }
+
+      const merged = [...starts, ...contains].slice(0, 20);
+      setResults(merged);
     } finally {
       setIsSearching(false);
     }
@@ -388,26 +390,25 @@ export default function NovaPublicHome() {
         },
       });
 
-      // mark the original not_found scan as relinked + who we matched
+      // mark the original not_found/error scan as relinked + who we matched
       if (pendingScanId) {
         await updateDoc(doc(db, 'scans', pendingScanId), {
           matchedUserId: selectedUser.id,
           user: {
             id: selectedUser.id,
-            name: selectedUser.name || '',
+            name: selectedUser.name,
             photoURL: selectedUser.photoURL || null,
           },
           status: 'relinked',
           relinkedAt: serverTimestamp(),
         });
       } else {
-        // if no prior scan id (edge), at least log a new scan record
         await addDoc(collection(db, 'scans'), {
           badgeCode: pendingBadgeCode,
           matchedUserId: selectedUser.id,
           user: {
             id: selectedUser.id,
-            name: selectedUser.name || '',
+            name: selectedUser.name,
             photoURL: selectedUser.photoURL || null,
           },
           status: 'relinked',
@@ -537,9 +538,9 @@ export default function NovaPublicHome() {
 
               <h2 className="text-2xl font-bold text-slate-900">Hey there!</h2>
               <p className="text-base leading-relaxed text-slate-600 max-w-md mx-auto">
-                I see you have a membership with us. We’re taking your experience to the next level —
-                part of that requires us to <span className="font-semibold">re-link your badge</span> with your membership.
-                It’s super easy. I can walk you through it, or you can get help from our front desk. What would you like?
+                I see you have a membership with us. We’re taking your experience to the next level — part of that
+                requires us to <span className="font-semibold">re-link your badge</span> with your membership. It’s super
+                easy. I can walk you through it, or you can get help from our front desk. What would you like?
               </p>
 
               {/* Actions */}
@@ -559,13 +560,9 @@ export default function NovaPublicHome() {
                 </button>
               </div>
 
-              {!helpNotified && (
-                <div className="text-xs text-slate-500 mt-2">Auto closing in {dismissIn}s</div>
-              )}
+              {!helpNotified && <div className="text-xs text-slate-500 mt-2">Auto closing in {dismissIn}s</div>}
               {helpNotified && (
-                <div className="text-sm text-slate-600 mt-2">
-                  We’ve let the front desk know. Please see someone there.
-                </div>
+                <div className="text-sm text-slate-600 mt-2">We’ve let the front desk know. Please see someone there.</div>
               )}
 
               <button
@@ -579,7 +576,7 @@ export default function NovaPublicHome() {
         )}
       </AnimatePresence>
 
-      {/* Self-serve: Assign Badge Wizard */}
+      {/* Self-serve: Assign Badge Wizard (client-side search via UserContext) */}
       <AnimatePresence>
         {showWizard && (
           <motion.div
@@ -601,15 +598,11 @@ export default function NovaPublicHome() {
                 <div>
                   <h3 className="text-xl md:text-2xl font-bold text-slate-900">Assign badge to your membership</h3>
                   <p className="text-slate-600 mt-1">
-                    Type your <span className="font-semibold">first and last name</span>, pick your membership, and we’ll link badge{' '}
-                    <span className="font-mono">{pendingBadgeCode || '—'}</span>.
+                    Type your <span className="font-semibold">first and last name</span>, pick your membership, and we’ll
+                    link badge <span className="font-mono">{pendingBadgeCode || '—'}</span>.
                   </p>
                 </div>
-                {linkDone ? (
-                  <CheckCircle2 className="w-7 h-7 text-green-600" />
-                ) : (
-                  <Search className="w-7 h-7 text-slate-400" />
-                )}
+                {linkDone ? <CheckCircle2 className="w-7 h-7 text-green-600" /> : <Search className="w-7 h-7 text-slate-400" />}
               </div>
 
               {/* Search input */}
@@ -637,7 +630,7 @@ export default function NovaPublicHome() {
                 </p>
               </div>
 
-              {/* Results */}
+              {/* Results (from prefetched users) */}
               <div className="mt-5 space-y-2 max-h-64 overflow-auto pr-1">
                 {results.length === 0 && !isSearching && (
                   <div className="text-slate-500 text-sm">No results yet — try searching your full name.</div>
@@ -647,9 +640,7 @@ export default function NovaPublicHome() {
                     key={u.id}
                     onClick={() => setSelectedUser(u)}
                     className={`w-full text-left p-3 rounded-xl border transition ${
-                      selectedUser?.id === u.id
-                        ? 'border-blue-400 bg-blue-50'
-                        : 'border-slate-200 hover:bg-slate-50'
+                      selectedUser?.id === u.id ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'
                     }`}
                   >
                     <div className="flex items-center gap-3">
@@ -660,12 +651,9 @@ export default function NovaPublicHome() {
                         className="w-10 h-10 rounded-xl object-cover"
                       />
                       <div className="min-w-0">
-                        <div className="font-medium text-slate-900 truncate">
-                          {u.name || 'Unnamed'}
-                        </div>
+                        <div className="font-medium text-slate-900 truncate">{u.name || 'Unnamed'}</div>
                         <div className="text-xs text-slate-500 truncate">
-                          {u.email || '—'} · {u.phone || '—'}{' '}
-                          {u.membershipType ? `· ${u.membershipType}` : ''}
+                          {u.email || '—'} · {u.phone || '—'} {u.membershipType ? `· ${u.membershipType}` : ''}
                         </div>
                       </div>
                     </div>
