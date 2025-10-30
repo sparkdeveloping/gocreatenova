@@ -73,7 +73,7 @@ export default function NovaPublicHome() {
   const [showRelinkModal, setShowRelinkModal] = useState(false);
   const [pendingBadgeCode, setPendingBadgeCode] = useState('');
   const [pendingScanId, setPendingScanId] = useState(null);
-  const [dismissIn, setDismissIn] = useState(7);
+  const [dismissIn, setDismissIn] = useState(20); // ← 20s
 
   // Self-serve wizard
   const [showWizard, setShowWizard] = useState(false);
@@ -83,6 +83,9 @@ export default function NovaPublicHome() {
   const [selectedUser, setSelectedUser] = useState(null);
   const [linking, setLinking] = useState(false);
   const [linkDone, setLinkDone] = useState(false);
+
+  // Local fallback users for production if context didn't preload
+  const [localUsers, setLocalUsers] = useState([]);
 
   // Front desk help
   const [helpNotified, setHelpNotified] = useState(false);
@@ -232,7 +235,7 @@ export default function NovaPublicHome() {
   // RELINK / WIZARD HELPERS
   // —————————————————————————————————————————————
   function openRelinkModal() {
-    setDismissIn(7);
+    setDismissIn(20); // ← reset to 20 when opening
     setHelpNotified(false);
     setShowRelinkModal(true);
     resetBuffer();
@@ -275,6 +278,18 @@ export default function NovaPublicHome() {
     }
   };
 
+  const ensureUsersLoaded = async () => {
+    if (Array.isArray(allUsers) && allUsers.length > 0) return;
+    if (localUsers.length > 0) return;
+    try {
+      const snap = await getDocs(collection(db, 'users'));
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setLocalUsers(list);
+    } catch (e) {
+      console.warn('Fallback user fetch failed', e);
+    }
+  };
+
   const openWizard = async () => {
     try {
       if (pendingScanId) {
@@ -283,11 +298,14 @@ export default function NovaPublicHome() {
         });
       }
     } catch (e) { console.warn('Could not mark flow choice on scan:', e); }
+    await ensureUsersLoaded(); // ← ensure we have users even in prod
     setShowWizard(true);
   };
 
+  const sourceUsers = (allUsers && allUsers.length > 0) ? allUsers : localUsers;
+
   const allUsersIndexed = useMemo(
-    () => (allUsers || []).map((u) => ({
+    () => (sourceUsers || []).map((u) => ({
       id: u.id,
       name: u.fullName || u.name || '',
       nameNorm: normalize(u.fullName || u.name || ''),
@@ -297,7 +315,7 @@ export default function NovaPublicHome() {
       membershipType: u.membershipType || u.membership || '',
       photoURL: u.photoURL || null,
     })),
-    [allUsers]
+    [sourceUsers]
   );
 
   const searchCandidates = async () => {
@@ -372,7 +390,7 @@ export default function NovaPublicHome() {
       {/* Main grid centered vertically */}
       <div className="max-w-7xl mx-auto px-6 py-10 min-h-screen flex items-center">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 w-full items-stretch">
-          {/* LEFT: Scanner zone (no clipping; arrow sits inside) */}
+          {/* LEFT: Scanner zone */}
           <section className="relative rounded-[2rem] overflow-hidden min-h-[620px] border border-slate-200 bg-gradient-to-b from-white/70 via-sky-50/60 to-white">
             {/* Top content */}
             <div className="px-8 md:px-10 pt-8">
@@ -389,14 +407,21 @@ export default function NovaPublicHome() {
               </div>
             </div>
 
-            {/* Middle feedback glyph: centered between copy and bottom */}
-            <div className="absolute left-0 right-0 flex justify-center"
-                 style={{ top: '48%', transform: 'translateY(-50%)' }}>
+            {/* Gray scan glyph — aligned under the copy column, not floating center */}
+            <div
+              className="absolute"
+              style={{
+                // Align to the same left padding as copy, sit in the middle third vertically
+                left: 40, // slightly inset from px-8 padding for balance
+                top: '52%',
+                transform: 'translateY(-50%)',
+              }}
+            >
               <motion.div
-                animate={{ scale: isReading ? [1, 1.08, 1] : 1, opacity: isReading ? [0.5, 1, 0.5] : 0.35 }}
+                animate={{ scale: isReading ? [1, 1.08, 1] : 1, opacity: isReading ? [0.45, 1, 0.45] : 0.35 }}
                 transition={{ repeat: isReading ? Infinity : 0, duration: 1.6, ease: 'easeInOut' }}
               >
-                <ScanLine className="text-slate-700" style={{ width: 72, height: 72 }} strokeWidth={1.8} />
+                <ScanLine className="text-slate-700" style={{ width: 64, height: 64 }} strokeWidth={1.8} />
               </motion.div>
             </div>
 
@@ -408,10 +433,10 @@ export default function NovaPublicHome() {
                 transition={{ repeat: Infinity, duration: 1.5, ease: 'easeInOut' }}
                 className="flex flex-col items-start"
               >
-                <div className="rounded-full bg-blue-600 text-white shadow-lg px-5 py-2 text-base md:text-lg font-semibold mb-2">
+                <div className="rounded-full bg-indigo-600 text-white shadow-lg px-5 py-2 text-base md:text-lg font-semibold mb-2">
                   Scan here
                 </div>
-                <ArrowDown className="w-16 h-16 md:w-20 md:h-20 text-blue-600 drop-shadow" strokeWidth={2.4} />
+                <ArrowDown className="w-16 h-16 md:w-20 md:h-20 text-indigo-600 drop-shadow" strokeWidth={2.4} />
               </motion.div>
             </div>
 
@@ -649,7 +674,7 @@ export default function NovaPublicHome() {
       {/* Animated gradient text CSS */}
       <style jsx global>{`
         .gradient-text {
-          background: linear-gradient(90deg, #1d4ed8, #22d3ee, #1d4ed8);
+          background: linear-gradient(90deg, #4f46e5, #22d3ee, #4f46e5);
           -webkit-background-clip: text;
           background-clip: text;
           color: transparent;
