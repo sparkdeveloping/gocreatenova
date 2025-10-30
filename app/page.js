@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react'
 import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -90,6 +90,26 @@ export default function NovaPublicHome() {
   // Front desk help
   const [helpNotified, setHelpNotified] = useState(false);
   const [helpNotifying, setHelpNotifying] = useState(false);
+// --- commit dedupe (prevents double scans from Enter + idle or CRLF) ---
+const lastCommitRef = useRef({ code: '', at: 0 });
+const pendingCommitRef = useRef(null);
+
+function requestCommit(raw) {
+  const c = clamp5(raw || '');
+  if (c.length < 5) return;
+
+  const now = Date.now();
+  const { code: prev, at } = lastCommitRef.current;
+  // suppress duplicates of same code within 1s
+  if (prev === c && now - at < 1000) return;
+
+  lastCommitRef.current = { code: c, at: now };
+  // cancel any micro-queued commit
+  if (pendingCommitRef.current) clearTimeout(pendingCommitRef.current);
+  pendingCommitRef.current = setTimeout(() => {
+    commitScan(c); // plays sound + handles Firestore
+  }, 0);
+}
 
   useEffect(() => { refreshRoles(false); }, [refreshRoles]);
 
@@ -116,11 +136,11 @@ export default function NovaPublicHome() {
         setBuf((prev) => clamp5(prev + k));
         setLastKeyAt(Date.now());
       } else if (k === 'Enter') {
-        if (buf.length >= 5) {
-          e.preventDefault();
-          commitScan(buf.slice(0, 5));
-        }
-      } else if (k === 'Escape') {
+ if (buf.length >= 5) {
+    e.preventDefault();
+    requestCommit(buf.slice(0, 5));
+ }
+  } else if (k === 'Escape') {
         resetBuffer();
       }
     };
@@ -133,9 +153,9 @@ export default function NovaPublicHome() {
   useEffect(() => {
     if (!buf || showRelinkModal || showWizard) return;
     const elapsed = Date.now() - lastKeyAt;
-    if (buf.length >= 5 && elapsed > 140) {
-      commitScan(buf.slice(0, 5)); return;
-    }
+ if (buf.length >= 5 && elapsed > 140) {
+   requestCommit(buf.slice(0, 5)); return;
+ }
     const t = setTimeout(() => {
       const gap = Date.now() - lastKeyAt;
       if (buf.length >= 5 && gap > 200) commitScan(buf.slice(0, 5));
@@ -164,7 +184,7 @@ export default function NovaPublicHome() {
 
   const clickToTest = async () => {
     if (showRelinkModal || showWizard) return;
-    if (buf.length === 5) return commitScan(buf);
+    if (buf.length === 5) return requestCommit(buf);
   };
 
   // —————————————————————————————————————————————
