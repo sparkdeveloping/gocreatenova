@@ -17,6 +17,8 @@ import {
   Image as ImageIcon,
   MapPin,
   Sparkles,
+  ShieldAlert,
+  Clock8
 } from 'lucide-react';
 import {
   getFirestore,
@@ -52,6 +54,67 @@ const phrases = [
   'Today’s a great day to make.',
 ];
 
+// Dates
+function toDateSafe(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v;
+  if (typeof v?.toDate === 'function') return v.toDate();
+  if (v?.seconds) return new Date(v.seconds * 1000);
+  if (typeof v === 'number') return new Date(v < 1e10 ? v * 1000 : v);
+  if (typeof v === 'string') {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+function getMembershipStatus(user) {
+  const now = new Date();
+  const sub = user?.activeSubscription || null;
+  const expiresAt = toDateSafe(sub?.expiresAt);
+  const hadAny =
+    !!sub ||
+    (Array.isArray(user?.subscriptions) && user.subscriptions.length > 0) ||
+    !!toDateSafe(user?.membershipExpiresAt);
+
+  if (expiresAt && expiresAt > now) {
+    return {
+      label: 'Active',
+      code: 'active',
+      expiresAt,
+      planName: sub?.name || null,
+      planId: sub?.planId || null,
+      cycle: sub?.cycle || 'monthly',
+      hadAny,
+    };
+  }
+  if (hadAny) {
+    return {
+      label: 'Expired',
+      code: 'expired',
+      expiresAt,
+      planName: sub?.name || null,
+      planId: sub?.planId || null,
+      cycle: sub?.cycle || 'monthly',
+      hadAny,
+    };
+  }
+  return { label: 'Inactive', code: 'inactive', expiresAt: null, planName: null, planId: null, cycle: null, hadAny: false };
+}
+function formatCountdown(target) {
+  const t = toDateSafe(target);
+  if (!t) return '—';
+  const now = new Date();
+  let ms = t - now;
+  if (ms <= 0) return 'expired';
+  const sec = Math.floor(ms / 1000);
+  const days = Math.floor(sec / 86400);
+  const hours = Math.floor((sec % 86400) / 3600);
+  const mins = Math.floor((sec % 3600) / 60);
+  if (days > 0) return `${days} day${days === 1 ? '' : 's'} ${hours}h ${mins}m`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
 // —————————————————————————————————————————————
 
 export default function NovaPublicHome() {
@@ -64,7 +127,7 @@ export default function NovaPublicHome() {
   const [greeting, setGreeting] = useState('');
   const [phrase, setPhrase] = useState(phrases[Math.floor(Math.random() * phrases.length)]);
 
-  // Live clock (for Quick Actions header with seconds)
+  // Live clock (header with seconds)
   const [now, setNow] = useState(new Date());
   useEffect(() => {
     const tick = setInterval(() => setNow(new Date()), 1000);
@@ -84,11 +147,11 @@ export default function NovaPublicHome() {
   const [lastKeyAt, setLastKeyAt] = useState(0);
   const [isReading, setIsReading] = useState(false);
 
-  // Relink flow state
+  // Relink flow state (not found / error)
   const [showRelinkModal, setShowRelinkModal] = useState(false);
   const [pendingBadgeCode, setPendingBadgeCode] = useState('');
   const [pendingScanId, setPendingScanId] = useState(null);
-  const [dismissIn, setDismissIn] = useState(20); // 20s
+  const [dismissIn, setDismissIn] = useState(20);
 
   // Self-serve wizard
   const [showWizard, setShowWizard] = useState(false);
@@ -106,7 +169,12 @@ export default function NovaPublicHome() {
   const [helpNotified, setHelpNotified] = useState(false);
   const [helpNotifying, setHelpNotifying] = useState(false);
 
-  // --- commit dedupe (prevents double scans from Enter + idle or CRLF) ---
+  // Membership heads-up (≤ 7 days left)
+  const [headsUp, setHeadsUp] = useState(null); // { user, status, scanId }
+  // Membership block (expired/inactive)
+  const [blockInfo, setBlockInfo] = useState(null); // { user, status, scanId }
+
+  // --- commit dedupe ---
   const lastCommitRef = useRef({ code: '', at: 0 });
   const pendingCommitRef = useRef(null);
   function requestCommit(raw) {
@@ -139,7 +207,7 @@ export default function NovaPublicHome() {
   // Scanner key buffer
   useEffect(() => {
     const onKey = (e) => {
-      if (showRelinkModal || showWizard) return;
+      if (showRelinkModal || showWizard || headsUp || blockInfo) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const k = e.key ?? '';
       if (/\d/.test(k)) {
@@ -158,11 +226,11 @@ export default function NovaPublicHome() {
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [buf, showRelinkModal, showWizard]);
+  }, [buf, showRelinkModal, showWizard, headsUp, blockInfo]);
 
   // Idle auto-commit
   useEffect(() => {
-    if (!buf || showRelinkModal || showWizard) return;
+    if (!buf || showRelinkModal || showWizard || headsUp || blockInfo) return;
     const elapsed = Date.now() - lastKeyAt;
     if (buf.length >= 5 && elapsed > 140) {
       requestCommit(buf.slice(0, 5)); return;
@@ -173,7 +241,7 @@ export default function NovaPublicHome() {
     }, 220);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [buf, lastKeyAt, showRelinkModal, showWizard]);
+  }, [buf, lastKeyAt, showRelinkModal, showWizard, headsUp, blockInfo]);
 
   function resetBuffer() {
     setBuf('');
@@ -194,13 +262,20 @@ export default function NovaPublicHome() {
   }
 
   const clickToTest = async () => {
-    if (showRelinkModal || showWizard) return;
+    if (showRelinkModal || showWizard || headsUp || blockInfo) return;
     if (buf.length === 5) return requestCommit(buf);
   };
 
   // —————————————————————————————————————————————
-  // MAIN SCAN HANDLER
+  // MAIN SCAN HANDLER (with membership checks)
   // —————————————————————————————————————————————
+  const proceedToCheckin = (hitId, data) => {
+    const scanned = { id: hitId, ...data };
+    localStorage.setItem('nova-user', JSON.stringify(scanned));
+    setCurrentUser(scanned);
+    router.replace('/checkin');
+  };
+
   const handleScan = async (code) => {
     try {
       const badgeCode = clamp5(code);
@@ -236,17 +311,42 @@ export default function NovaPublicHome() {
       }
 
       const data = hit.data() || {};
-      const matchedUser = { id: hit.id, name: data.fullName || data.name || '', photoURL: data.photoURL || null };
+      const matchedUserMinimal = { id: hit.id, name: data.fullName || data.name || '', photoURL: data.photoURL || null };
 
-      await addDoc(collection(db, 'scans'), {
-        badgeCode, matchedUserId: hit.id, user: matchedUser, status: 'matched',
+      // evaluate membership
+      const status = getMembershipStatus(data);
+
+      if (status.code === 'active') {
+        // log scan first
+        const scanRef = await addDoc(collection(db, 'scans'), {
+          badgeCode, matchedUserId: hit.id, user: matchedUserMinimal, status: 'matched',
+          createdAt: serverTimestamp(), kioskId,
+        });
+
+        // warn when ≤ 7 days left
+        const daysLeft = status.expiresAt ? Math.ceil((toDateSafe(status.expiresAt) - new Date()) / 86400000) : 9999;
+        if (daysLeft <= 7) {
+          setHeadsUp({ user: { id: hit.id, ...data }, status, scanId: scanRef.id });
+          setPendingBadgeCode(badgeCode);
+          setPendingScanId(scanRef.id);
+          return;
+        }
+
+        // normal pass-through
+        proceedToCheckin(hit.id, data);
+        return;
+      }
+
+      // expired or inactive -> BLOCK + friendly modal
+      const blockStatus = status.code === 'expired' ? 'blocked_membership_expired' : 'blocked_membership_inactive';
+      const scanRef = await addDoc(collection(db, 'scans'), {
+        badgeCode, matchedUserId: hit.id, user: matchedUserMinimal, status: blockStatus,
         createdAt: serverTimestamp(), kioskId,
       });
-
-      const scanned = { id: hit.id, ...data };
-      localStorage.setItem('nova-user', JSON.stringify(scanned));
-      setCurrentUser(scanned);
-      router.replace('/checkin');
+      setBlockInfo({ user: { id: hit.id, ...data }, status, scanId: scanRef.id });
+      setPendingScanId(scanRef.id);
+      setPendingBadgeCode(badgeCode);
+      return;
     } catch (err) {
       console.error('Scan lookup error:', err);
       try {
@@ -271,7 +371,7 @@ export default function NovaPublicHome() {
     setShowRelinkModal(true);
     resetBuffer();
   }
-  function closeRelinkModal() {
+  function closeRelinkAndWizard() {
     setShowRelinkModal(false);
     setShowWizard(false);
     setSelectedUser(null);
@@ -282,7 +382,7 @@ export default function NovaPublicHome() {
 
   useEffect(() => {
     if (!showRelinkModal || showWizard) return;
-    if (dismissIn <= 0) { closeRelinkModal(); return; }
+    if (dismissIn <= 0) { closeRelinkAndWizard(); return; }
     const id = setTimeout(() => setDismissIn((s) => s - 1), 1000);
     return () => clearTimeout(id);
   }, [showRelinkModal, showWizard, dismissIn]);
@@ -293,11 +393,13 @@ export default function NovaPublicHome() {
     try {
       if (pendingScanId) {
         await updateDoc(doc(db, 'scans', pendingScanId), {
-          flowChoice: 'help', flowChosenAt: serverTimestamp(), status: 'relink_help_requested',
+          flowChoice: 'help', flowChosenAt: serverTimestamp(),
+          status: blockInfo ? 'referred_for_membership_help' : 'relink_help_requested',
         });
       }
       await addDoc(collection(db, 'assistanceRequests'), {
-        type: 'badge_relink', kioskId, badgeCode: pendingBadgeCode || null,
+        type: blockInfo ? 'membership_help' : 'badge_relink',
+        kioskId, badgeCode: pendingBadgeCode || null,
         scanId: pendingScanId || null, status: 'open', createdAt: serverTimestamp(),
       });
       setHelpNotified(true);
@@ -345,6 +447,7 @@ export default function NovaPublicHome() {
       phone: u.phone || u.phoneNumber || '',
       membershipType: u.membershipType || u.membership || '',
       photoURL: u.photoURL || null,
+      activeSubscription: u.activeSubscription || null,
     })),
     [sourceUsers]
   );
@@ -369,6 +472,7 @@ export default function NovaPublicHome() {
     } finally { setIsSearching(false); }
   };
 
+  // Link badge in wizard — then apply same membership gate
   const linkBadgeToUser = async () => {
     if (!selectedUser || !pendingBadgeCode) return;
     setLinking(true);
@@ -391,7 +495,7 @@ export default function NovaPublicHome() {
           relinkedAt: serverTimestamp(),
         });
       } else {
-        await addDoc(collection(db, 'scans'), {
+        const ref = await addDoc(collection(db, 'scans'), {
           badgeCode: pendingBadgeCode,
           matchedUserId: selectedUser.id,
           user: { id: selectedUser.id, name: selectedUser.name, photoURL: selectedUser.photoURL || null },
@@ -399,11 +503,31 @@ export default function NovaPublicHome() {
           createdAt: serverTimestamp(),
           kioskId,
         });
+        setPendingScanId(ref.id);
       }
 
       const enriched = { ...selectedUser, badge: { id: String(pendingBadgeCode) } };
       localStorage.setItem('nova-user', JSON.stringify(enriched));
       setCurrentUser(enriched);
+
+      // Gate after linking
+      const status = getMembershipStatus(enriched);
+      if (status.code !== 'active') {
+        setBlockInfo({ user: enriched, status, scanId: pendingScanId });
+        setShowWizard(false);
+        setShowRelinkModal(false);
+        setLinkDone(false);
+        return;
+      }
+      // If active but close to expiring, show heads-up; else proceed
+      const daysLeft = status.expiresAt ? Math.ceil((toDateSafe(status.expiresAt) - new Date()) / 86400000) : 9999;
+      if (daysLeft <= 7) {
+        setHeadsUp({ user: enriched, status, scanId: pendingScanId });
+        setShowWizard(false);
+        setShowRelinkModal(false);
+        setLinkDone(false);
+        return;
+      }
 
       setLinkDone(true);
       setTimeout(() => router.replace('/checkin'), 700);
@@ -572,7 +696,120 @@ export default function NovaPublicHome() {
         <Image src="/Logo.svg" alt="GoCreate Nova" width={84} height={84} priority />
       </div>
 
-      {/* Relink / Assistance modal */}
+      {/* Heads-up modal: membership expiring soon */}
+      <AnimatePresence>
+        {!!headsUp && (
+          <motion.div
+            key="overlay-headsup"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[10020] flex items-center justify-center bg-amber-50/70 backdrop-blur-sm"
+          >
+            <motion.div
+              key="card-headsup"
+              initial={{ y: 24, opacity: 0, scale: 0.98 }}
+              animate={{ y: 0, opacity: 1, scale: 1 }}
+              exit={{ y: 8, opacity: 0, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+              className="w-full max-w-lg rounded-[2rem] text-center flex flex-col items-center bg-white p-8 shadow-2xl"
+            >
+              <div className="flex items-center gap-2 text-amber-600">
+                <Clock8 className="w-7 h-7" />
+                <h2 className="text-2xl font-bold text-slate-900">Heads up — expiring soon</h2>
+              </div>
+              <p className="text-slate-600 mt-2 max-w-md">
+                Your membership is still active, but it expires in{' '}
+                <span className="font-semibold">
+                  {formatCountdown(headsUp.status.expiresAt)}
+                </span>.
+              </p>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
+                <button
+                  onClick={() => {
+                    proceedToCheckin(headsUp.user.id, headsUp.user);
+                  }}
+                  className="h-12 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700"
+                >
+                  Continue to check in
+                </button>
+                <button
+                  onClick={notifyFrontDesk}
+                  className="h-12 rounded-full bg-white border border-slate-200 text-slate-800 font-semibold hover:bg-slate-50 flex items-center justify-center gap-2"
+                >
+                  <HandHelping className="w-5 h-5 text-slate-500" />
+                  Talk to front desk
+                </button>
+              </div>
+              <button
+                onClick={() => setHeadsUp(null)}
+                className="mt-3 h-10 px-5 rounded-full bg-slate-900 text-white font-medium hover:opacity-90"
+              >
+                Close
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Block modal: membership required / expired */}
+      <AnimatePresence>
+        {!!blockInfo && (
+          <motion.div
+            key="overlay-block"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[10030] flex items-center justify-center bg-rose-50/70 backdrop-blur-sm"
+          >
+            <motion.div
+              key="card-block"
+              initial={{ y: 24, opacity: 0, scale: 0.98 }}
+              animate={{ y: 0, opacity: 1, scale: 1 }}
+              exit={{ y: 8, opacity: 0, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+              className="w-full max-w-xl rounded-[2rem] text-center flex flex-col items-center bg-white p-8 shadow-2xl"
+            >
+              <div className="flex items-center gap-2 text-rose-600">
+                <ShieldAlert className="w-7 h-7" />
+                <h2 className="text-2xl font-bold text-slate-900">
+                  {blockInfo.status.code === 'expired' ? 'Membership expired' : 'Membership required'}
+                </h2>
+              </div>
+              <p className="text-slate-600 mt-2 max-w-lg">
+                We can’t check you in yet. Please see someone at the front desk to{' '}
+                {blockInfo.status.code === 'expired' ? 'renew your membership' : 'start a membership'}.
+                We’ll get you taken care of quickly.
+              </p>
+
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
+                <button
+                  onClick={notifyFrontDesk}
+                  className="h-12 rounded-full bg-slate-900 text-white font-semibold hover:opacity-90 flex items-center justify-center gap-2"
+                >
+                  <HandHelping className="w-5 h-5" />
+                  Let the front desk know
+                </button>
+                <Link
+                  href="/about"
+                  className="h-12 rounded-full bg-white border border-slate-200 text-slate-800 font-semibold hover:bg-slate-50 grid place-items-center"
+                >
+                  Learn about memberships
+                </Link>
+              </div>
+
+              <button
+                onClick={() => setBlockInfo(null)}
+                className="mt-3 h-10 px-5 rounded-full bg-white border border-slate-200 text-slate-800 font-medium hover:bg-slate-50"
+              >
+                Close
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Relink / Assistance modal (not found / error) */}
       <AnimatePresence>
         {showRelinkModal && !showWizard && (
           <motion.div
@@ -594,9 +831,7 @@ export default function NovaPublicHome() {
               <div><AlertCircle className="w-14 h-14" style={{ color: '#f97316' }} /></div>
               <h2 className="text-2xl font-bold text-slate-900">Hey there!</h2>
               <p className="text-base leading-relaxed text-slate-600 max-w-md mx-auto">
-                I see you have a membership with us. We’re taking your experience to the next
-                level — part of that requires us to <span className="font-semibold">re-link your badge</span> with your
-                membership. It’s super easy. I can walk you through it, or you can get help from our front desk. What would you like?
+                We couldn’t match that badge yet. Let’s <span className="font-semibold">link it to your membership</span>. I can walk you through it, or you can get help from our front desk.
               </p>
 
               <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
@@ -615,7 +850,7 @@ export default function NovaPublicHome() {
               {!helpNotified && <div className="text-xs text-slate-500 mt-2">Auto closing in {dismissIn}s</div>}
               {helpNotified && <div className="text-sm text-slate-600 mt-2">We’ve let the front desk know. Please see someone there.</div>}
 
-              <button onClick={closeRelinkModal} className="mt-3 h-10 px-5 rounded-full bg-slate-900 text-white font-medium hover:opacity-90">
+              <button onClick={closeRelinkAndWizard} className="mt-3 h-10 px-5 rounded-full bg-slate-900 text-white font-medium hover:opacity-90">
                 OK
               </button>
             </motion.div>
@@ -712,7 +947,7 @@ export default function NovaPublicHome() {
                   Back
                 </button>
                 <button
-                  onClick={closeRelinkModal}
+                  onClick={closeRelinkAndWizard}
                   className="h-12 px-5 rounded-full bg-slate-900 text-white font-semibold hover:opacity-90"
                 >
                   Close
