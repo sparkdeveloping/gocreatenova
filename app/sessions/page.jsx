@@ -14,6 +14,8 @@ import {
   limit as fsLimit,
   doc,
   updateDoc,
+  addDoc,
+  serverTimestamp,
 } from 'firebase/firestore';
 import { app } from '../lib/firebase';
 
@@ -23,9 +25,9 @@ import {
   ScanLine,
   Download,
   CalendarRange,
-  AlertCircle,
   UserPlus,
   ChevronDown,
+  ShieldAlert,
 } from 'lucide-react';
 
 import { intervalToDuration } from 'date-fns';
@@ -41,21 +43,13 @@ import SearchInput from '@/app/components/ui/SearchInput';
 import { ViewToggleButton } from '@/app/components/ui/ToolbarButtons';
 import StatBox from '@/app/components/ui/StatBox';
 
+// 🔁 use live employee role index from /app/lib/employeeRoles
+import { useEmployeeRoleIndex, userIsEmployee } from '@/app/lib/employeeRoles';
+
 // —————————————————————————————————————————————
 // Helpers
-const staffish = ['tech', 'mentor', 'admin', 'staff', 'employee', 'student tech'];
 const byLower = (s) => String(s || '').toLowerCase();
 
-function isEmployee(u) {
-  return (
-    Array.isArray(u?.roles) &&
-    u.roles.some((r) =>
-      staffish.includes(
-        String(typeof r === 'object' ? r?.name || r?.id || '' : r).toLowerCase()
-      )
-    )
-  );
-}
 function hasBadge(u) {
   return !!(u?.badge?.id || u?.badgeId);
 }
@@ -68,7 +62,7 @@ function toDateMaybe(v) {
   return null;
 }
 
-// smart relative time (per spec)
+// smart relative time (per spec you asked for)
 function formatRelativeSmart(dateInput) {
   const d = toDateMaybe(dateInput);
   if (!d) return '—';
@@ -83,14 +77,13 @@ function formatRelativeSmart(dateInput) {
   if (diffSec < 60) return 'just now';
   if (diffMin < 60) return `${diffMin} minute${diffMin === 1 ? '' : 's'} ago`;
   if (diffHr < 2) return '1 hour ago';
-  // beyond 2 hours → show time if today
+
   const sameDay =
     d.getFullYear() === now.getFullYear() &&
     d.getMonth() === now.getMonth() &&
     d.getDate() === now.getDate();
   if (sameDay) return timeOnly;
 
-  // yesterday…
   const y = new Date(now);
   y.setDate(now.getDate() - 1);
   const isYesterday =
@@ -99,17 +92,14 @@ function formatRelativeSmart(dateInput) {
     d.getDate() === y.getDate();
   if (isYesterday) return `Yesterday, ${timeOnly}`;
 
-  // within this week → Weekday + time
   const startOfWeek = new Date(now);
   startOfWeek.setHours(0, 0, 0, 0);
-  // Sunday = 0
-  startOfWeek.setDate(now.getDate() - now.getDay());
+  startOfWeek.setDate(now.getDate() - now.getDay()); // Sunday
   if (d >= startOfWeek) {
-    const weekday = d.toLocaleDateString([], { weekday: 'short' }); // Mon/Tue…
+    const weekday = d.toLocaleDateString([], { weekday: 'short' });
     return `${weekday} ${timeOnly}`;
   }
 
-  // else full date
   return d.toLocaleString();
 }
 
@@ -141,17 +131,80 @@ function startOfThisWeekSunday() {
 }
 
 // —————————————————————————————————————————————
+// Membership status resolver (subscription-first, ignores old member.expired flag)
+// Looks for any of the following shapes you might save on the user:
+// - user.activeSubscription { status, expiresAt }
+// - user.subscription { status, expiresAt }
+// - user.subscriptionExpiresAt / user.membershipUntil (timestamp/date/seconds)
+// If none found: treat as expired.
+function getMembershipStatus(user) {
+  const u = user || {};
+  const sub =
+    u.activeSubscription ||
+    u.subscription ||
+    u.currentSubscription ||
+    null;
+
+  let expiresAt =
+    sub?.expiresAt ||
+    u.subscriptionExpiresAt ||
+    u.membershipUntil ||
+    u.membershipExpiresAt ||
+    null;
+
+  // Firestore Timestamp / seconds / millis / Date
+  if (expiresAt?.toDate) expiresAt = expiresAt.toDate();
+  else if (typeof expiresAt === 'object' && typeof expiresAt.seconds === 'number')
+    expiresAt = new Date(expiresAt.seconds * 1000);
+  else if (typeof expiresAt === 'number')
+    expiresAt = new Date(expiresAt < 10_000_000_000 ? expiresAt * 1000 : expiresAt);
+  else if (!(expiresAt instanceof Date)) expiresAt = null;
+
+  const now = new Date();
+  // status from sub if present, otherwise compute by date
+  let status = sub?.status || (expiresAt && expiresAt > now ? 'active' : 'expired');
+
+  // normalize
+  status = status?.toLowerCase();
+  if (status !== 'active') status = 'expired';
+
+  const expiresLabel = expiresAt
+    ? expiresAt.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })
+    : null;
+
+  return { status, expiresAt, expiresLabel };
+}
+
+// dynamic employee predicate
+function isEmployee(user, empIdsSet) {
+  return userIsEmployee(user, empIdsSet);
+}
+
+// —————————————————————————————————————————————
 
 export default function SessionsPage() {
   const db = getFirestore(app);
+
+  // dynamic employee roles (live from roles collection)
+  const emp = useEmployeeRoleIndex(); // { ids:Set<string>, byId:{[id]:roleDoc} }
+
+  const employeeRoleOptions = useMemo(() => {
+    const opts = Object.values(emp.byId || {})
+      .filter((r) => r?.isEmployee)
+      .map((r) => ({
+        value: byLower(r.name || r.id),
+        label: r.name || r.id,
+      }));
+    return opts;
+  }, [emp.byId]);
 
   // sessions + filters
   const [sessions, setSessions] = useState([]);
   const [filteredSessions, setFilteredSessions] = useState([]);
 
-  const [mode, setMode] = useState('all');
-  const [employeeRole, setEmployeeRole] = useState('all');
-  const [viewMode, setViewMode] = useState('table');
+  const [mode, setMode] = useState('all'); // all | members | employees
+  const [employeeRole, setEmployeeRole] = useState('all'); // specific employee role filter
+  const [viewMode, setViewMode] = useState('table'); // card | table
   const [searchTerm, setSearchTerm] = useState('');
 
   // date filters (default to Today)
@@ -172,6 +225,10 @@ export default function SessionsPage() {
   // preload users for assign
   const [allUsers, setAllUsers] = useState([]);
   const [assignSearch, setAssignSearch] = useState('');
+
+  // membership renew modal
+  const [renewOpen, setRenewOpen] = useState(false);
+  const [renewTarget, setRenewTarget] = useState(null); // user object
 
   // 🔹 REAL-TIME sessions
   useEffect(() => {
@@ -219,7 +276,6 @@ export default function SessionsPage() {
       setShowDatePicker(false);
       setDateRange([{ startDate: startOfThisWeekSunday(), endDate: new Date(), key: 'selection' }]);
     } else {
-      // custom
       setShowDatePicker(true);
     }
   };
@@ -228,15 +284,15 @@ export default function SessionsPage() {
   useEffect(() => {
     let list = [...sessions];
 
-    if (mode === 'members') list = list.filter((s) => !isEmployee(s.member));
-    else if (mode === 'employees') {
-      list = list.filter((s) => isEmployee(s.member));
+    if (mode === 'members') {
+      list = list.filter((s) => !isEmployee(s.member, emp.ids));
+    } else if (mode === 'employees') {
+      list = list.filter((s) => isEmployee(s.member, emp.ids));
       if (employeeRole !== 'all') {
+        const want = byLower(employeeRole);
         list = list.filter((s) =>
-          s.member?.roles?.some((r) =>
-            String(typeof r === 'object' ? r?.name || '' : r)
-              .toLowerCase()
-              .includes(employeeRole)
+          (s.member?.roles || []).some((r) =>
+            byLower(typeof r === 'object' ? r?.name || r?.id || '' : r).includes(want)
           )
         );
       }
@@ -259,22 +315,16 @@ export default function SessionsPage() {
     }
 
     setFilteredSessions(list);
-  }, [sessions, mode, employeeRole, searchTerm, dateRange]);
+  }, [sessions, mode, employeeRole, searchTerm, dateRange, emp.ids]);
 
   // 🔹 Stats
-  const memberCount = useMemo(() => sessions.filter((s) => !isEmployee(s.member)).length, [sessions]);
-  const employeeCount = useMemo(() => sessions.filter((s) => isEmployee(s.member)).length, [sessions]);
-  const staffCount = useMemo(
-    () => sessions.filter((s) => s.member?.roles?.some((r) => (r.name || '').toLowerCase() === 'staff')).length,
-    [sessions]
+  const memberCount = useMemo(
+    () => sessions.filter((s) => !isEmployee(s.member, emp.ids)).length,
+    [sessions, emp.ids]
   );
-  const techCount = useMemo(
-    () => sessions.filter((s) => s.member?.roles?.some((r) => (r.name || '').toLowerCase() === 'tech')).length,
-    [sessions]
-  );
-  const studentTechCount = useMemo(
-    () => sessions.filter((s) => s.member?.roles?.some((r) => (r.name || '').toLowerCase() === 'student tech')).length,
-    [sessions]
+  const employeeCount = useMemo(
+    () => sessions.filter((s) => isEmployee(s.member, emp.ids)).length,
+    [sessions, emp.ids]
   );
 
   // 🔹 Utils
@@ -290,16 +340,18 @@ export default function SessionsPage() {
   const readableType = (type) => (type === 'ClockIn' ? 'Shift' : 'Regular');
 
   const exportCSV = () => {
-    const header = ['Name', 'Type', 'Start', 'End', 'Duration'];
+    const header = ['Name', 'Type', 'Start', 'End', 'Duration', 'Membership'];
     const rows = filteredSessions.map((s) => {
       const start = toDateMaybe(s.startTime);
       const end = toDateMaybe(s.endTime);
+      const m = getMembershipStatus(s.member);
       return [
         s.member?.fullName || s.member?.name || '',
         readableType(s.type),
         start ? start.toLocaleString() : '',
         end ? end.toLocaleString() : 'Active',
         formatDuration(s.startTime, s.endTime),
+        m.status === 'active' ? `Active (until ${m.expiresLabel || '—'})` : 'Expired',
       ];
     });
     const csv = [header, ...rows].map((r) => r.join(',')).join('\n');
@@ -323,15 +375,15 @@ export default function SessionsPage() {
     setSelectedScan(null);
   };
 
-  // 🔹 Lock scroll
+  // 🔹 Lock scroll for modals
   useEffect(() => {
-    const anyOpen = !!modalSession || assignOpen;
+    const anyOpen = !!modalSession || assignOpen || renewOpen;
     if (anyOpen) {
       const prev = document.body.style.overflow;
       document.body.style.overflow = 'hidden';
       return () => (document.body.style.overflow = prev);
     }
-  }, [modalSession, assignOpen]);
+  }, [modalSession, assignOpen, renewOpen]);
 
   // —————————————————————————————————————————————
   return (
@@ -359,9 +411,13 @@ export default function SessionsPage() {
             <SessionsPanel
               filteredSessions={filteredSessions}
               mode={mode}
-              setMode={setMode}
+              setMode={(v) => {
+                setMode(v);
+                setEmployeeRole('all');
+              }}
               employeeRole={employeeRole}
               setEmployeeRole={setEmployeeRole}
+              employeeRoleOptions={employeeRoleOptions}
               showDatePicker={showDatePicker}
               setShowDatePicker={setShowDatePicker}
               dateRange={dateRange}
@@ -373,14 +429,15 @@ export default function SessionsPage() {
               setViewMode={setViewMode}
               memberCount={memberCount}
               employeeCount={employeeCount}
-              staffCount={staffCount}
-              techCount={techCount}
-              studentTechCount={studentTechCount}
               setModalSession={setModalSession}
               formatDuration={formatDuration}
               readableType={readableType}
               quickRange={quickRange}
               applyQuickRange={applyQuickRange}
+              onRenew={(member) => {
+                setRenewTarget(member);
+                setRenewOpen(true);
+              }}
             />
           </CardShell>
         </div>
@@ -399,6 +456,19 @@ export default function SessionsPage() {
         search={assignSearch}
         setSearch={setAssignSearch}
         onAssign={handleAssignToUser}
+      />
+
+      <RenewMembershipModal
+        open={renewOpen}
+        member={renewTarget}
+        onClose={() => {
+          setRenewOpen(false);
+          setRenewTarget(null);
+        }}
+        onSaved={() => {
+          setRenewOpen(false);
+          setRenewTarget(null);
+        }}
       />
     </div>
   );
@@ -500,6 +570,7 @@ function SessionsPanel({
   setMode,
   employeeRole,
   setEmployeeRole,
+  employeeRoleOptions,
   showDatePicker,
   setShowDatePicker,
   dateRange,
@@ -511,14 +582,12 @@ function SessionsPanel({
   setViewMode,
   memberCount,
   employeeCount,
-  staffCount,
-  techCount,
-  studentTechCount,
   setModalSession,
   formatDuration,
   readableType,
   quickRange,
   applyQuickRange,
+  onRenew,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -600,9 +669,6 @@ function SessionsPanel({
         <StatBox label="Total" count={filteredSessions.length} />
         <StatBox label="Members" count={memberCount} />
         <StatBox label="Employees" count={employeeCount} />
-        <StatBox label="Staff" count={staffCount} />
-        <StatBox label="Techs" count={techCount} />
-        <StatBox label="Student Techs" count={studentTechCount} />
       </div>
 
       {/* Capsule filters */}
@@ -619,6 +685,7 @@ function SessionsPanel({
             { value: 'employees', label: 'Employees' },
           ]}
         />
+
         <AnimatePresence>
           {mode === 'employees' && (
             <motion.div
@@ -630,12 +697,7 @@ function SessionsPanel({
               <FilterPills
                 value={employeeRole}
                 onChange={setEmployeeRole}
-                options={[
-                  { value: 'all', label: 'All' },
-                  { value: 'staff', label: 'Staff' },
-                  { value: 'tech', label: 'Tech' },
-                  { value: 'student tech', label: 'Student Tech' },
-                ]}
+                options={[{ value: 'all', label: 'All' }, ...employeeRoleOptions]}
               />
             </motion.div>
           )}
@@ -664,46 +726,16 @@ function SessionsPanel({
       <div className="mt-4">
         {viewMode === 'card' ? (
           <div className="grid gap-4 sm:grid-cols-1 md:grid-cols-2">
-            {filteredSessions.map((s) => {
-              const start = toDateMaybe(s.startTime);
-              const end = toDateMaybe(s.endTime);
-              const duration = formatDuration(s.startTime, s.endTime);
-              const name = s.member?.fullName || s.member?.name || 'Unknown';
-              const membership = s.member?.membershipType || '—';
-
-              return (
-                <div
-                  key={s.id}
-                  onClick={() => setModalSession(s)}
-                  className="cursor-pointer backdrop-blur-md bg-white/50 border border-slate-200 rounded-[2rem] shadow-xl p-4 hover:shadow-lg transition"
-                >
-                  <div className="flex items-center gap-2 mb-1 font-semibold text-black">
-                    <BadgeCheck className="w-4 h-4 text-slate-500" />
-                    {name}
-                  </div>
-                  <div className="text-xs text-slate-500 mb-1">
-                    Membership: <span className="text-slate-700">{membership}</span>
-                  </div>
-                  <div className="text-sm text-slate-500 mb-1">
-                    <ScanLine className="inline w-4 h-4 mr-1" />
-                    {readableType(s.type)}
-                  </div>
-                  <div className="text-sm text-slate-500 mb-1">
-                    <Clock className="inline w-4 h-4 mr-1" />
-                    {start ? start.toLocaleString() : '—'}
-                  </div>
-                  <div className="text-sm mb-1">
-                    {end ? (
-                      <span className="text-black">{duration}</span>
-                    ) : (
-                      <span className="text-blue-500 font-medium">
-                        Active • {duration}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+            {filteredSessions.map((s) => (
+              <SessionCard
+                key={s.id}
+                s={s}
+                formatDuration={formatDuration}
+                readableType={readableType}
+                onOpen={() => setModalSession(s)}
+                onRenew={onRenew}
+              />
+            ))}
           </div>
         ) : (
           <div className="backdrop-blur-md bg-white/50 border border-slate-200 rounded-[2rem] shadow-xl overflow-x-auto p-4">
@@ -717,6 +749,8 @@ function SessionsPanel({
                   <th className="px-2 py-1">Start</th>
                   <th className="px-2 py-1">End</th>
                   <th className="px-2 py-1">Duration</th>
+                  <th className="px-2 py-1">Status</th>
+                  <th className="px-2 py-1"></th>
                 </tr>
               </thead>
               <tbody>
@@ -727,24 +761,47 @@ function SessionsPanel({
                   const name = s.member?.fullName || s.member?.name || 'Unknown';
                   const membership = s.member?.membershipType || '—';
                   const roles = (s.member?.roles || [])
-                    .map((r) =>
-                      typeof r === 'object' ? r?.name || r?.id || 'role' : r
-                    )
+                    .map((r) => (typeof r === 'object' ? r?.name || r?.id || 'role' : r))
                     .join(', ') || '—';
+
+                  const m = getMembershipStatus(s.member);
+                  const chipCls =
+                    m.status === 'active'
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : 'bg-rose-100 text-rose-700';
 
                   return (
                     <tr
                       key={s.id}
-                      onClick={() => setModalSession(s)}
-                      className="border-t border-slate-200 hover:bg-white/70 cursor-pointer"
+                      className="border-t border-slate-200 hover:bg-white/70"
                     >
-                      <td className="px-2 py-1 font-semibold text-black">{name}</td>
+                      <td className="px-2 py-1 font-semibold text-black cursor-pointer" onClick={() => setModalSession(s)}>
+                        {name}
+                      </td>
                       <td className="px-2 py-1 text-slate-600">{membership}</td>
                       <td className="px-2 py-1 text-slate-600">{roles}</td>
                       <td className="px-2 py-1">{readableType(s.type)}</td>
                       <td className="px-2 py-1">{start ? start.toLocaleString() : '—'}</td>
                       <td className="px-2 py-1">{end ? end.toLocaleString() : 'Active'}</td>
                       <td className="px-2 py-1">{end ? duration : ''}</td>
+                      <td className="px-2 py-1">
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full ${chipCls}`}>
+                          {m.status === 'active' ? 'Active' : 'Expired'}
+                          {m.expiresLabel && m.status === 'active' && (
+                            <span className="opacity-70">· {m.expiresLabel}</span>
+                          )}
+                        </span>
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        {m.status === 'expired' && (
+                          <button
+                            className="rounded-full px-3 py-1.5 text-xs font-semibold bg-blue-500 text-white hover:bg-blue-600"
+                            onClick={() => onRenew(s.member)}
+                          >
+                            Renew
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
@@ -757,6 +814,75 @@ function SessionsPanel({
   );
 }
 
+function SessionCard({ s, formatDuration, readableType, onOpen, onRenew }) {
+  const start = toDateMaybe(s.startTime);
+  const end = toDateMaybe(s.endTime);
+  const duration = formatDuration(s.startTime, s.endTime);
+  const name = s.member?.fullName || s.member?.name || 'Unknown';
+  const membership = s.member?.membershipType || '—';
+  const m = getMembershipStatus(s.member);
+  const chipCls =
+    m.status === 'active'
+      ? 'bg-emerald-100 text-emerald-700'
+      : 'bg-rose-100 text-rose-700';
+
+  return (
+    <div
+      onClick={onOpen}
+      className="cursor-pointer backdrop-blur-md bg-white/50 border border-slate-200 rounded-[2rem] shadow-xl p-4 hover:shadow-lg transition"
+    >
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <div className="flex items-center gap-2 font-semibold text-black">
+          <BadgeCheck className="w-4 h-4 text-slate-500" />
+          {name}
+        </div>
+        <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full ${chipCls}`}>
+          {m.status === 'active' ? 'Active' : 'Expired'}
+          {m.status === 'expired' && <ShieldAlert className="w-3 h-3" />}
+          {m.expiresLabel && m.status === 'active' && (
+            <span className="opacity-70">· {m.expiresLabel}</span>
+          )}
+        </span>
+      </div>
+
+      <div className="text-xs text-slate-500 mb-1">
+        Membership: <span className="text-slate-700">{membership}</span>
+      </div>
+      <div className="text-sm text-slate-500 mb-1">
+        <ScanLine className="inline w-4 h-4 mr-1" />
+        {readableType(s.type)}
+      </div>
+      <div className="text-sm text-slate-500 mb-1">
+        <Clock className="inline w-4 h-4 mr-1" />
+        {start ? start.toLocaleString() : '—'}
+      </div>
+      <div className="text-sm mb-3">
+        {end ? (
+          <span className="text-black">{duration}</span>
+        ) : (
+          <span className="text-blue-500 font-medium">
+            Active • {duration}
+          </span>
+        )}
+      </div>
+
+      {m.status === 'expired' && (
+        <div className="flex justify-end">
+          <button
+            className="rounded-full px-3 py-1.5 text-xs font-semibold bg-blue-500 text-white hover:bg-blue-600"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRenew(s.member);
+            }}
+          >
+            Renew
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SessionModal({ session, onClose }) {
   const [activeTab, setActiveTab] = useState('current');
   if (!session) return null;
@@ -764,13 +890,18 @@ function SessionModal({ session, onClose }) {
   const start = session.startTime?.toDate ? session.startTime.toDate() : new Date(session.startTime);
   const end = session.endTime?.toDate ? session.endTime.toDate() : null;
   const type = session.type === 'ClockIn' ? 'Shift' : 'Regular';
-  const statusVerb = session.type === 'ClockIn' ? 'Clocked' : 'Checked';
 
   const name = session.member?.fullName || session.member?.name || 'Unknown';
   const membership = session.member?.membershipType || '—';
   const roles = (session.member?.roles || [])
     .map((r) => (typeof r === 'object' ? r?.name || r?.id || 'role' : r))
     .join(', ') || '—';
+
+  const m = getMembershipStatus(session.member);
+  const chipCls =
+    m.status === 'active'
+      ? 'bg-emerald-100 text-emerald-700'
+      : 'bg-rose-100 text-rose-700';
 
   return (
     <ModalPortal>
@@ -794,7 +925,15 @@ function SessionModal({ session, onClose }) {
             <h2 className="text-xl font-bold">Session Details</h2>
 
             <div className="space-y-1 text-sm text-slate-700">
-              <div><strong>Name:</strong> {name}</div>
+              <div className="flex items-center gap-2">
+                <strong>Name:</strong> {name}
+                <span className={`ml-2 inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full ${chipCls}`}>
+                  {m.status === 'active' ? 'Active' : 'Expired'}
+                  {m.expiresLabel && m.status === 'active' && (
+                    <span className="opacity-70">· {m.expiresLabel}</span>
+                  )}
+                </span>
+              </div>
               <div><strong>Membership:</strong> {membership}</div>
               <div><strong>Roles:</strong> {roles}</div>
               <div><strong>Badge:</strong> {session.member?.badgeId || session.member?.badge?.id || 'N/A'}</div>
@@ -964,4 +1103,142 @@ function AssignBadgeModal({ open, onClose, badgeCode, users, search, setSearch, 
 
 function ModalPortal({ children }) {
   return typeof document !== 'undefined' ? createPortal(children, document.body) : null;
+}
+
+/* —————————————————————————————————————————————
+   Lightweight "Renew Membership" modal
+   Creates a payment doc (invoice/receipt) attached to the member.
+   Lines default to one "Membership Renewal" item; staff can edit later.
+————————————————————————————————————————————— */
+function RenewMembershipModal({ open, member, onClose, onSaved }) {
+  const db = getFirestore(app);
+  const [paid, setPaid] = useState(true); // receipt if true; invoice if false
+  const [method, setMethod] = useState('cash'); // cash | card | check
+  const [externalRef, setExternalRef] = useState('');
+  const [amount, setAmount] = useState(0);
+
+  if (!open || !member) return null;
+
+  const canSave = externalRef.trim().length > 0 && Number(amount) >= 0;
+
+  const savePayment = async () => {
+    const payload = {
+      type: paid ? 'receipt' : 'invoice',
+      status: paid ? 'paid' : 'unpaid',
+      method,
+      externalRef: externalRef.trim(),
+      lines: [
+        { itemId: 'membership', name: 'Membership Renewal', qty: 1, unitPrice: Number(amount) || 0, total: Number(amount) || 0 },
+      ],
+      total: Number(amount) || 0,
+      userId: member.id,
+      userName: member.fullName || member.name || '',
+      createdAt: serverTimestamp(),
+      reason: 'membership_renewal',
+    };
+
+    await addDoc(collection(db, 'payments'), payload);
+    onSaved && onSaved();
+  };
+
+  return (
+    <ModalPortal>
+      <AnimatePresence>
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-[2147483647] flex items-center justify-center p-4 md:p-8 bg-white/40 backdrop-blur-lg supports-[backdrop-filter]:bg-white/30"
+          style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
+          onClick={onClose}
+        >
+          <motion.div
+            initial={{ y: 32, opacity: 0, scale: 0.985 }}
+            animate={{ y: 0, opacity: 1, scale: 1 }}
+            exit={{ y: 18, opacity: 0, scale: 0.985 }}
+            transition={{ duration: 0.22, ease: 'easeOut' }}
+            className="bg-white/90 backdrop-blur-md rounded-[2rem] shadow-2xl border border-slate-200 w-[min(92vw,36rem)] p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-xl font-semibold">Renew Membership</h3>
+            <div className="text-sm text-slate-700 mt-1">
+              <div className="font-medium">{member.fullName || member.name}</div>
+              <div className="text-slate-500 text-xs">
+                ID: <span className="font-mono">{member.id || '—'}</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-600 mb-1 block">Amount</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className="w-full h-10 px-3 rounded-xl bg-gray-100 hover:bg-gray-200 focus:bg-white outline-none"
+                  placeholder="0.00"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 mb-1 block">External Ref #</label>
+                <input
+                  type="text"
+                  value={externalRef}
+                  onChange={(e) => setExternalRef(e.target.value)}
+                  className="w-full h-10 px-3 rounded-xl bg-gray-100 hover:bg-gray-200 focus:bg-white outline-none"
+                  placeholder="POS/Receipt/Check #"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 mb-1 block">Method</label>
+                <select
+                  value={method}
+                  onChange={(e) => setMethod(e.target.value)}
+                  className="w-full h-10 px-3 rounded-xl bg-gray-100 hover:bg-gray-200 focus:bg-white outline-none"
+                >
+                  {['cash', 'card', 'check'].map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 mb-1 block">Paid now? (Receipt)</label>
+                <select
+                  value={paid ? 'yes' : 'no'}
+                  onChange={(e) => setPaid(e.target.value === 'yes')}
+                  className="w-full h-10 px-3 rounded-xl bg-gray-100 hover:bg-gray-200 focus:bg-white outline-none"
+                >
+                  <option value="yes">Yes — save as Receipt</option>
+                  <option value="no">No — save as Invoice</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                onClick={onClose}
+                className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={!canSave}
+                onClick={savePayment}
+                className={`px-4 py-2 rounded-xl text-white shadow ${!canSave ? 'bg-blue-300' : 'bg-blue-500 hover:bg-blue-600'}`}
+              >
+                Save {paid ? 'Receipt' : 'Invoice'}
+              </button>
+            </div>
+
+            <div className="text-[11px] text-slate-500 mt-3">
+              This only records payment. If you also advance the user's subscription
+              (e.g., set a new <code>subscriptionExpiresAt</code>), do that in the profile
+              flow or via your subscription routine.
+            </div>
+          </motion.div>
+        </motion.div>
+      </AnimatePresence>
+    </ModalPortal>
+  );
 }
