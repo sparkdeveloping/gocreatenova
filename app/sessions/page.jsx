@@ -171,6 +171,16 @@ export default function SessionsPage() {
   // preload users for assign
   const [allUsers, setAllUsers] = useState([]);
   const [assignSearch, setAssignSearch] = useState('');
+// live users map (id -> user)
+const [usersMap, setUsersMap] = useState({});
+useEffect(() => {
+  const unsub = onSnapshot(collection(db, 'users'), (snap) => {
+    const m = {};
+    snap.forEach((d) => { m[d.id] = { id: d.id, ...d.data() }; });
+    setUsersMap(m);
+  });
+  return () => unsub();
+}, [db]);
 
   // RT sessions
   useEffect(() => {
@@ -232,13 +242,13 @@ export default function SessionsPage() {
   useEffect(() => {
     let list = [...sessions];
 
-    if (mode === 'members') list = list.filter((s) => !userIsEmployee(s.member, emp.ids));
+    if (mode === 'members') list = list.filter((s) => !userIsEmployee(currentMemberFor(s, usersMap), emp.ids));
     else if (mode === 'employees') {
-      list = list.filter((s) => userIsEmployee(s.member, emp.ids));
+      list = list.filter((s) => userIsEmployee(currentMemberFor(s, usersMap), emp.ids));
       if (employeeRole !== 'all') {
         const want = byLower(employeeRole);
         list = list.filter((s) =>
-          (s.member?.roles || []).some((r) =>
+          (currentMemberFor(s, usersMap)?.roles || []).some((r) =>
             byLower(typeof r === 'object' ? r?.name || r?.id || '' : r).includes(want)
           )
         );
@@ -249,7 +259,7 @@ export default function SessionsPage() {
     if (planFilter !== 'all') {
       const want = byLower(planFilter);
       list = list.filter((s) => {
-        const m = getMembershipStatus(s.member);
+        const m = getMembershipStatus(currentMemberFor(s, usersMap));
         const planName = byLower(m.planName || '');
         const planId = byLower(m.planId || '');
         return planName.includes(want) || planId === want;
@@ -258,7 +268,7 @@ export default function SessionsPage() {
 
     const q = byLower(searchTerm);
     if (q) {
-      list = list.filter((s) => (s.member?.fullName || s.member?.name || '').toLowerCase().includes(q));
+      list = list.filter((s) => (currentMemberFor(s, usersMap)?.fullName || currentMemberFor(s, usersMap)?.name || '').toLowerCase().includes(q));
     }
 
     const { startDate, endDate } = dateRange[0] || {};
@@ -270,11 +280,11 @@ export default function SessionsPage() {
     }
 
     setFilteredSessions(list);
-  }, [sessions, mode, employeeRole, planFilter, searchTerm, dateRange, emp.ids]);
+  }, [sessions, mode, employeeRole, planFilter, searchTerm, dateRange, emp.ids, usersMap]);
 
   // stats
-  const memberCount = useMemo(() => sessions.filter((s) => !userIsEmployee(s.member, emp.ids)).length, [sessions, emp.ids]);
-  const employeeCount = useMemo(() => sessions.filter((s) => userIsEmployee(s.member, emp.ids)).length, [sessions, emp.ids]);
+  const memberCount = useMemo(() => sessions.filter((s) => !userIsEmployee(currentMemberFor(s, usersMap), emp.ids)).length, [sessions, emp.ids]);
+  const employeeCount = useMemo(() => sessions.filter((s) => userIsEmployee(currentMemberFor(s, usersMap), emp.ids)).length, [sessions, emp.ids]);
 
   // utils
   const formatDuration = (start, end) => {
@@ -293,13 +303,13 @@ export default function SessionsPage() {
     const rows = filteredSessions.map((s) => {
       const start = toDateMaybe(s.startTime);
       const end = toDateMaybe(s.endTime);
-      const m = getMembershipStatus(s.member);
+      const m = getMembershipStatus(currentMemberFor(s, usersMap));
       const until = m.expiresAt ? m.expiresAt.toLocaleDateString([], { month:'short', day:'numeric', year:'numeric' }) : '—';
       const statusTxt =
         m.code === 'active' ? `Active (until ${until})` :
         m.code === 'expired' ? `Expired (was ${until})` : 'Inactive';
       return [
-        s.member?.fullName || s.member?.name || '',
+        currentMemberFor(s, usersMap)?.fullName || currentMemberFor(s, usersMap)?.name || '',
         m.planName || '—',
         readableType(s.type),
         start ? start.toLocaleString() : '',
@@ -364,6 +374,7 @@ export default function SessionsPage() {
           <CardShell>
             <SessionsPanel
               filteredSessions={filteredSessions}
+              usersMap={usersMap}
               mode={mode}
               setMode={(v) => { setMode(v); setEmployeeRole('all'); }}
               employeeRole={employeeRole}
@@ -513,9 +524,16 @@ function EmptyScans() {
     </div>
   );
 }
+function currentMemberFor(session, usersMap) {
+  const embedded = session?.member || {};
+  const live = embedded?.id ? usersMap[embedded.id] : null;
+  // prefer live user (has fresh activeSubscription), but keep fallback name/badge
+  return live ? { ...embedded, ...live } : embedded;
+}
 
 function SessionsPanel({
   filteredSessions,
+  usersMap,
   mode, setMode,
   employeeRole, setEmployeeRole, employeeRoleOptions,
   planFilter, setPlanFilter, planOptions,
@@ -626,6 +644,7 @@ function SessionsPanel({
           <div className="grid gap-4 sm:grid-cols-1 md:grid-cols-2">
             {filteredSessions.map((s) => (
               <SessionCard key={s.id} s={s}
+              usersMap={usersMap}
                 formatDuration={formatDuration} readableType={readableType}
                 onOpen={() => setModalSession(s)}
                 onRenew={onRenew} onExtend={onExtend} onEndNow={onEndNow} onClearSub={onClearSub}
@@ -652,8 +671,8 @@ function SessionsPanel({
                   const start = toDateMaybe(s.startTime);
                   const end = toDateMaybe(s.endTime);
                   const duration = formatDuration(s.startTime, s.endTime);
-                  const name = s.member?.fullName || s.member?.name || 'Unknown';
-                  const m = getMembershipStatus(s.member);
+                  const name = currentMemberFor(s, usersMap)?.fullName || currentMemberFor(s, usersMap)?.name || 'Unknown';
+                  const m = getMembershipStatus(currentMemberFor(s, usersMap));
 
                   const capsuleCls =
                     m.code === 'active' ? 'bg-emerald-100 text-emerald-700'
@@ -683,12 +702,12 @@ function SessionsPanel({
                       </td>
                       <td className="px-2 py-1 text-right">
                         <QuickManageMenu
-                          member={s.member}
+                          member={currentMemberFor(s, usersMap)}
                           status={m}
-                          onRenew={() => onRenew(s.member)}
-                          onExtend={() => onExtend(s.member)}
-                          onEndNow={() => onEndNow(s.member)}
-                          onClearSub={() => onClearSub(s.member)}
+                          onRenew={() => onRenew(currentMemberFor(s, usersMap))}
+                          onExtend={() => onExtend(currentMemberFor(s, usersMap))}
+                          onEndNow={() => onEndNow(currentMemberFor(s, usersMap))}
+                          onClearSub={() => onClearSub(currentMemberFor(s, usersMap))}
                         />
                       </td>
                     </tr>
@@ -741,12 +760,11 @@ function QuickManageMenu({ member, status, onRenew, onExtend, onEndNow, onClearS
   );
 }
 
-function SessionCard({ s, formatDuration, readableType, onOpen, onRenew, onExtend, onEndNow, onClearSub }) {
-  const start = toDateMaybe(s.startTime);
+function SessionCard({ s, usersMap, formatDuration, readableType, onOpen, onRenew, onExtend, onEndNow, onClearSub }) {  const start = toDateMaybe(s.startTime);
   const end = toDateMaybe(s.endTime);
   const duration = formatDuration(s.startTime, s.endTime);
-  const name = s.member?.fullName || s.member?.name || 'Unknown';
-  const m = getMembershipStatus(s.member);
+  const name = currentMemberFor(s, usersMap)?.fullName || currentMemberFor(s, usersMap)?.name || 'Unknown';
+  const m = getMembershipStatus(currentMemberFor(s, usersMap));
 
   const capsuleCls =
     m.code === 'active' ? 'bg-emerald-100 text-emerald-700'
@@ -783,20 +801,20 @@ function SessionCard({ s, formatDuration, readableType, onOpen, onRenew, onExten
       <div className="flex justify-end gap-2">
         <button
           className="rounded-full px-3 py-1.5 text-xs font-semibold bg-blue-500 text-white hover:bg-blue-600"
-          onClick={(e) => { e.stopPropagation(); onRenew(s.member); }}
+          onClick={(e) => { e.stopPropagation(); onRenew(currentMemberFor(s, usersMap)); }}
         >
           Renew
         </button>
         <button
           className="rounded-full px-3 py-1.5 text-xs font-semibold bg-slate-200 hover:bg-slate-300"
-          onClick={(e) => { e.stopPropagation(); onExtend(s.member); }}
+          onClick={(e) => { e.stopPropagation(); onExtend(currentMemberFor(s, usersMap)); }}
           disabled={m.code === 'inactive'}
         >
           +1 cycle
         </button>
         <button
           className="rounded-full px-3 py-1.5 text-xs font-semibold bg-rose-100 text-rose-700 hover:bg-rose-200"
-          onClick={(e) => { e.stopPropagation(); onEndNow(s.member); }}
+          onClick={(e) => { e.stopPropagation(); onEndNow(currentMemberFor(s, usersMap)); }}
           disabled={m.code !== 'active'}
         >
           End now
@@ -983,37 +1001,46 @@ function RenewMembershipModal({ open, member, subsCatalog, onClose, onSaved }) {
   const canSave = !!plan;
 
   const savePaymentAndActivate = async () => {
+  try {
     const startedAt = new Date();
     const expiresAt = addCycle(startedAt, plan?.cycle || 'monthly');
 
-    // Write a payment that references the chosen subscription (no manual price entry)
-    const payment = {
+    // 1) record payment
+    await addDoc(collection(db, 'payments'), {
       type: 'receipt',
       status: 'paid',
-      method: 'card',            // optional: set via UI if you want; fixed here since no custom amount asked
-      externalRef: `sub:${plan.id}`, // ties to plan; you can store a real POS ref if needed
-      lines: [{ itemId: plan.id, name: plan.name, qty: 1, unitPrice: Number(plan.price || 0), total: Number(plan.price || 0) }],
+      method: 'card',
+      externalRef: `sub:${plan.id}`,
+      lines: [{ itemId: plan.id, name: plan.name, qty: 1, unitPrice: Number(plan.price||0), total: Number(plan.price||0) }],
       total: Number(plan.price || 0),
-      userId: member.id,
+      userId: member.id || member.uid || member.userId,      // <-- robust id
       userName: member.fullName || member.name || '',
       createdAt: serverTimestamp(),
       reason: 'membership_renewal',
-    };
-    await addDoc(collection(db, 'payments'), payment);
+    });
 
-    // Update user's activeSubscription strictly from the catalog
-    const activeSubscription = {
-      planId: plan.id,
-      name: plan.name,
-      cycle: plan.cycle || 'monthly',
-      startedAt,
-      expiresAt,
-      status: 'active',
-    };
-    await updateDoc(doc(db, 'users', member.id), { activeSubscription });
+    // 2) activate on user doc
+    const uid = member.id || member.uid || member.userId;
+    if (!uid) throw new Error('No user id on member.');
+    await updateDoc(doc(db, 'users', uid), {
+      activeSubscription: {
+        planId: plan.id,
+        name: plan.name,
+        cycle: plan.cycle || 'monthly',
+        startedAt,
+        expiresAt,
+        status: 'active',
+      },
+    });
 
+    // 3) done
     onSaved && onSaved();
-  };
+  } catch (err) {
+    console.error('Renew failed:', err);
+    alert(`Renew failed: ${err?.message || err}`);
+  }
+};
+
 
   return (
     <ModalPortal>
