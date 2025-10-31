@@ -45,6 +45,34 @@ import StatBox from '@/app/components/ui/StatBox';
 
 // 🔁 use live employee role index from /app/lib/employeeRoles
 import { useEmployeeRoleIndex, userIsEmployee } from '@/app/lib/employeeRoles';
+function toDateSafe(v) {
+  // null / undefined
+  if (!v) return null;
+
+  // Already a Date
+  if (v instanceof Date) return v;
+
+  // Firestore Timestamp
+  if (typeof v?.toDate === 'function') return v.toDate();
+
+  // { seconds, nanoseconds } shape (server-side serialize)
+  if (typeof v === 'object' && v !== null && typeof v.seconds === 'number') {
+    return new Date(v.seconds * 1000);
+  }
+
+  // number (epoch seconds or millis)
+  if (typeof v === 'number') {
+    return new Date(v < 1e10 ? v * 1000 : v);
+  }
+
+  // ISO string / Date string
+  if (typeof v === 'string') {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  return null;
+}
 
 // —————————————————————————————————————————————
 // Helpers
@@ -145,28 +173,19 @@ function getMembershipStatus(user) {
     u.currentSubscription ||
     null;
 
-  let expiresAt =
-    sub?.expiresAt ||
-    u.subscriptionExpiresAt ||
-    u.membershipUntil ||
-    u.membershipExpiresAt ||
-    null;
+  // unify all shapes safely
+  let expiresAt = sub?.expiresAt
+    ?? u.subscriptionExpiresAt
+    ?? u.membershipUntil
+    ?? u.membershipExpiresAt
+    ?? null;
 
-  // Firestore Timestamp / seconds / millis / Date
-  if (expiresAt?.toDate) expiresAt = expiresAt.toDate();
-  else if (typeof expiresAt === 'object' && typeof expiresAt.seconds === 'number')
-    expiresAt = new Date(expiresAt.seconds * 1000);
-  else if (typeof expiresAt === 'number')
-    expiresAt = new Date(expiresAt < 10_000_000_000 ? expiresAt * 1000 : expiresAt);
-  else if (!(expiresAt instanceof Date)) expiresAt = null;
+  // ← this handles null, Timestamp, {seconds}, number, string, Date
+  expiresAt = toDateSafe(expiresAt);
 
   const now = new Date();
-  // status from sub if present, otherwise compute by date
-  let status = sub?.status || (expiresAt && expiresAt > now ? 'active' : 'expired');
-
-  // normalize
-  status = status?.toLowerCase();
-  if (status !== 'active') status = 'expired';
+  const statusRaw = sub?.status || (expiresAt && expiresAt > now ? 'active' : 'expired');
+  const status = (statusRaw || '').toLowerCase() === 'active' ? 'active' : 'expired';
 
   const expiresLabel = expiresAt
     ? expiresAt.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })
@@ -174,6 +193,7 @@ function getMembershipStatus(user) {
 
   return { status, expiresAt, expiresLabel };
 }
+
 
 // dynamic employee predicate
 function isEmployee(user, empIdsSet) {
