@@ -167,7 +167,7 @@ const pathname = usePathname();
     (async () => {
       try {
         const stored = localStorage.getItem('nova-user');
-        if (pathname.startsWith('/sessions')) {
+        if (pathname.startsWith('/dashboard')) {
   // Skip auth enforcement on migration route
   await fetchAllUsers();
   await refreshRoles(false);
