@@ -45,7 +45,7 @@ export default function CornerUtilities() {
         )}
         <div className="backdrop-blur-md bg-white/60 border border-slate-200 rounded-xl px-3 py-2 flex items-center gap-2 text-base text-slate-700 shadow-sm">
           <Sun className="w-5 h-5" />
-          Sunny • 88°F
+          Cold • 55°F
         </div>
       </div>
 
