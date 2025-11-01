@@ -42,7 +42,7 @@ export default function DashboardPage() {
   useEffect(() => {
     const stored = localStorage.getItem('nova-user');
     if (!stored) {
-      router.push('/');
+      router.push('/dashboard');
       return;
     }
     const parsed = JSON.parse(stored);
