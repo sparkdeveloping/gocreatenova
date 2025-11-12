@@ -10,17 +10,19 @@ import {
   useState,
 } from 'react';
 import {
-  getFirestore,
   collection,
-  getDocs,
   doc,
-  getDoc,
   onSnapshot,
   query,
+  where,
+  // cache-first helpers
+  getDocFromCache,
+  getDocFromServer,
+  getDocsFromCache,
+  getDocsFromServer,
 } from 'firebase/firestore';
-import { app } from '../lib/firebase';
-import { useRouter } from 'next/navigation';
-import { usePathname } from 'next/navigation';
+import { db } from '../lib/firebase';
+import { useRouter, usePathname } from 'next/navigation';
 
 const UserContext = createContext(null);
 
@@ -49,19 +51,78 @@ function writeRolesCache(roles) {
 }
 
 export const UserProvider = ({ children }) => {
-  const db = getFirestore(app);
   const router = useRouter();
-const pathname = usePathname();
+  const pathname = usePathname();
 
   // ---- Users ----
   const [currentUser, setCurrentUser] = useState(null);
   const [allUsers, setAllUsers] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // in-memory badge index: badgeId -> user (first match)
+  const badgeIndexRef = useRef(new Map());
+  const rebuildBadgeIndex = useCallback((users) => {
+    const map = new Map();
+    for (const u of users) {
+      const badges = u?.badges || u?.badgeMap || u?.badge_ids || {};
+      // support object map or array
+      if (Array.isArray(badges)) {
+        for (const b of badges) if (b) map.set(String(b), u);
+      } else if (badges && typeof badges === 'object') {
+        for (const [bid, val] of Object.entries(badges)) {
+          if (val) map.set(String(bid), u);
+        }
+      }
+    }
+    badgeIndexRef.current = map;
+  }, []);
+
   const fetchAllUsers = useCallback(async () => {
-    const snap = await getDocs(collection(db, 'users'));
-    setAllUsers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-  }, [db]);
+    // cache → server fallback
+    const colRef = collection(db, 'users');
+    try {
+      const snap = await getDocsFromCache(colRef);
+      const users = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setAllUsers(users);
+      rebuildBadgeIndex(users);
+    } catch {
+      // no cache yet; that's fine
+    }
+    const live = await getDocsFromServer(colRef);
+    const fresh = live.docs.map((d) => ({ id: d.id, ...d.data() }));
+    setAllUsers(fresh);
+    rebuildBadgeIndex(fresh);
+  }, [db, rebuildBadgeIndex]);
+
+  // Resolve by badge quickly; fall back to a 1-read query (cache-first)
+  const findUserByBadge = useCallback(
+    async (badgeId) => {
+      const key = String(badgeId);
+      const hit = badgeIndexRef.current.get(key);
+      if (hit) return hit;
+
+      const qRef = query(collection(db, 'users'), where(`badges.${key}`, '==', true));
+      // cache → server
+      try {
+        const csnap = await getDocsFromCache(qRef);
+        if (!csnap.empty) {
+          const d = csnap.docs[0];
+          const u = { id: d.id, ...d.data() };
+          badgeIndexRef.current.set(key, u);
+          return u;
+        }
+      } catch {}
+      const ssnap = await getDocsFromServer(qRef);
+      if (!ssnap.empty) {
+        const d = ssnap.docs[0];
+        const u = { id: d.id, ...d.data() };
+        badgeIndexRef.current.set(key, u);
+        return u;
+      }
+      return null;
+    },
+    [db]
+  );
 
   // ---- Roles ----
   const [roles, setRoles] = useState([]);
@@ -74,36 +135,54 @@ const pathname = usePathname();
     return m;
   }, [roles]);
 
-  const refreshRoles = useCallback(async (force = false) => {
-    // serve cache first (if allowed)
-    if (!force) {
-      const cached = readRolesCache();
-      if (cached?.length) {
-        setRoles(cached);
-        setRolesLoading(false);
+  const refreshRoles = useCallback(
+    async (force = false) => {
+      if (!force) {
+        const cached = readRolesCache();
+        if (cached?.length) {
+          setRoles(cached);
+          setRolesLoading(false);
+        }
       }
-    }
+      const colRef = collection(db, 'roles');
 
-    const snap = await getDocs(collection(db, 'roles'));
-    const fetched = snap.docs.map(d => {
-      const data = d.data();
-      return {
-        id: d.id,
-        ...data,
-        permissions: Array.isArray(data.permissions) ? data.permissions : [],
-      };
-    });
+      try {
+        const csnap = await getDocsFromCache(colRef);
+        const cachedRoles = csnap.docs.map((d) => ({
+          id: d.id,
+          permissions: [],
+          ...d.data(),
+          permissions: Array.isArray(d.data()?.permissions)
+            ? d.data().permissions
+            : [],
+        }));
+        if (cachedRoles.length) {
+          setRoles(cachedRoles);
+          setRolesLoading(false);
+        }
+      } catch {}
 
-    setRoles(fetched);
-    writeRolesCache(fetched);
-    setRolesLoading(false);
-  }, [db]);
+      const ssnap = await getDocsFromServer(colRef);
+      const fetched = ssnap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ...data,
+          permissions: Array.isArray(data.permissions) ? data.permissions : [],
+        };
+      });
+      setRoles(fetched);
+      writeRolesCache(fetched);
+      setRolesLoading(false);
+    },
+    [db]
+  );
 
   const startRolesListener = useCallback(() => {
     if (rolesListenerRef.current) return;
     const qRef = query(collection(db, 'roles'));
     rolesListenerRef.current = onSnapshot(qRef, (snap) => {
-      const live = snap.docs.map(d => {
+      const live = snap.docs.map((d) => {
         const data = d.data();
         return {
           id: d.id,
@@ -129,13 +208,13 @@ const pathname = usePathname();
     if (!currentUser) return new Set();
     const assigned = currentUser.roles || [];
     const ids = assigned
-      .map(r => (typeof r === 'string' ? r : r.id))
+      .map((r) => (typeof r === 'string' ? r : r.id))
       .filter(Boolean);
 
     const perms = new Set();
     for (const id of ids) {
       const role = rolesById.get(id);
-      (role?.permissions || []).forEach(p => perms.add(p));
+      (role?.permissions || []).forEach((p) => perms.add(p));
     }
     return perms;
   }, [currentUser, rolesById]);
@@ -144,7 +223,7 @@ const pathname = usePathname();
     (roleNameOrId) => {
       if (!currentUser) return false;
       const assigned = currentUser.roles || [];
-      return assigned.some(r =>
+      return assigned.some((r) =>
         typeof r === 'string'
           ? r === roleNameOrId
           : r.id === roleNameOrId || r.name === roleNameOrId
@@ -167,25 +246,40 @@ const pathname = usePathname();
     (async () => {
       try {
         const stored = localStorage.getItem('nova-user');
+
         if (pathname.startsWith('/migrate')) {
-  // Skip auth enforcement on migration route
-  await fetchAllUsers();
-  await refreshRoles(false);
-} else if (stored) {
-  const parsed = JSON.parse(stored);
-  const userDoc = await getDoc(doc(db, 'users', parsed.id));
+          // Skip auth enforcement on migration route
+          await fetchAllUsers();
+          await refreshRoles(false);
+        } else if (stored) {
+          const parsed = JSON.parse(stored);
 
-  if (userDoc.exists()) {
-    setCurrentUser({ id: userDoc.id, ...userDoc.data() });
-    await fetchAllUsers();
-  } else {
-    localStorage.removeItem('nova-user');
-    router.replace('/');
-  }
-} else {
-  router.replace('/');
-}
+          // current user: cache → server, plus live listener for JUST this doc
+          const ref = doc(db, 'users', parsed.id);
 
+          try {
+            const c = await getDocFromCache(ref);
+            if (c.exists()) setCurrentUser({ id: c.id, ...c.data() });
+          } catch {}
+
+          const s = await getDocFromServer(ref);
+          if (s.exists()) setCurrentUser({ id: s.id, ...s.data() });
+          else {
+            localStorage.removeItem('nova-user');
+            router.replace('/');
+            return;
+          }
+
+          // live updates (cheap)
+          onSnapshot(ref, (snap) => {
+            if (snap.exists()) setCurrentUser({ id: snap.id, ...snap.data() });
+          });
+
+          // Optional: load whole pool (uses cache after first run)
+          await fetchAllUsers();
+        } else {
+          router.replace('/');
+        }
 
         await refreshRoles(false);
       } finally {
@@ -199,7 +293,7 @@ const pathname = usePathname();
     };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [db, fetchAllUsers, refreshRoles, router]);
+  }, [db, fetchAllUsers, refreshRoles, router, pathname]);
 
   // ---- Memoize context value ----
   const value = useMemo(
@@ -211,6 +305,9 @@ const pathname = usePathname();
       setAllUsers,
       loading,
       refreshUsers: fetchAllUsers,
+
+      // fast badge resolver (memory → cache → server)
+      findUserByBadge,
 
       // roles
       roles,
@@ -229,6 +326,7 @@ const pathname = usePathname();
       allUsers,
       loading,
       fetchAllUsers,
+      findUserByBadge,
       roles,
       rolesById,
       rolesLoading,

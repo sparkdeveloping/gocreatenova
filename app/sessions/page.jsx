@@ -171,16 +171,6 @@ export default function SessionsPage() {
   // preload users for assign
   const [allUsers, setAllUsers] = useState([]);
   const [assignSearch, setAssignSearch] = useState('');
-// live users map (id -> user)
-const [usersMap, setUsersMap] = useState({});
-useEffect(() => {
-  const unsub = onSnapshot(collection(db, 'users'), (snap) => {
-    const m = {};
-    snap.forEach((d) => { m[d.id] = { id: d.id, ...d.data() }; });
-    setUsersMap(m);
-  });
-  return () => unsub();
-}, [db]);
 
   // RT sessions
   useEffect(() => {
@@ -237,18 +227,20 @@ useEffect(() => {
       setShowDatePicker(true);
     }
   };
-
+function memberFromSession(s) {
+  return s?.member || {};
+}
   // filtering
   useEffect(() => {
     let list = [...sessions];
 
-    if (mode === 'members') list = list.filter((s) => !userIsEmployee(currentMemberFor(s, usersMap), emp.ids));
+    if (mode === 'members') list = list.filter((s) => !userIsEmployee(memberFromSession(s), emp.ids));
     else if (mode === 'employees') {
-      list = list.filter((s) => userIsEmployee(currentMemberFor(s, usersMap), emp.ids));
+      list = list.filter((s) => userIsEmployee(memberFromSession(s), emp.ids));
       if (employeeRole !== 'all') {
         const want = byLower(employeeRole);
         list = list.filter((s) =>
-          (currentMemberFor(s, usersMap)?.roles || []).some((r) =>
+          (memberFromSession(s)?.roles || []).some((r) =>
             byLower(typeof r === 'object' ? r?.name || r?.id || '' : r).includes(want)
           )
         );
@@ -259,7 +251,7 @@ useEffect(() => {
     if (planFilter !== 'all') {
       const want = byLower(planFilter);
       list = list.filter((s) => {
-        const m = getMembershipStatus(currentMemberFor(s, usersMap));
+        const m = getMembershipStatus(memberFromSession(s));
         const planName = byLower(m.planName || '');
         const planId = byLower(m.planId || '');
         return planName.includes(want) || planId === want;
@@ -268,7 +260,7 @@ useEffect(() => {
 
     const q = byLower(searchTerm);
     if (q) {
-      list = list.filter((s) => (currentMemberFor(s, usersMap)?.fullName || currentMemberFor(s, usersMap)?.name || '').toLowerCase().includes(q));
+      list = list.filter((s) => (memberFromSession(s)?.fullName || memberFromSession(s)?.name || '').toLowerCase().includes(q));
     }
 
     const { startDate, endDate } = dateRange[0] || {};
@@ -283,8 +275,8 @@ useEffect(() => {
   }, [sessions, mode, employeeRole, planFilter, searchTerm, dateRange, emp.ids, usersMap]);
 
   // stats
-  const memberCount = useMemo(() => sessions.filter((s) => !userIsEmployee(currentMemberFor(s, usersMap), emp.ids)).length, [sessions, emp.ids]);
-  const employeeCount = useMemo(() => sessions.filter((s) => userIsEmployee(currentMemberFor(s, usersMap), emp.ids)).length, [sessions, emp.ids]);
+  const memberCount = useMemo(() => sessions.filter((s) => !userIsEmployee(memberFromSession(s), emp.ids)).length, [sessions, emp.ids]);
+  const employeeCount = useMemo(() => sessions.filter((s) => userIsEmployee(memberFromSession(s), emp.ids)).length, [sessions, emp.ids]);
 
   // utils
   const formatDuration = (start, end) => {
@@ -303,13 +295,13 @@ useEffect(() => {
     const rows = filteredSessions.map((s) => {
       const start = toDateMaybe(s.startTime);
       const end = toDateMaybe(s.endTime);
-      const m = getMembershipStatus(currentMemberFor(s, usersMap));
+      const m = getMembershipStatus(memberFromSession(s));
       const until = m.expiresAt ? m.expiresAt.toLocaleDateString([], { month:'short', day:'numeric', year:'numeric' }) : '—';
       const statusTxt =
         m.code === 'active' ? `Active (until ${until})` :
         m.code === 'expired' ? `Expired (was ${until})` : 'Inactive';
       return [
-        currentMemberFor(s, usersMap)?.fullName || currentMemberFor(s, usersMap)?.name || '',
+        memberFromSession(s)?.fullName || memberFromSession(s)?.name || '',
         m.planName || '—',
         readableType(s.type),
         start ? start.toLocaleString() : '',
@@ -671,8 +663,8 @@ function SessionsPanel({
                   const start = toDateMaybe(s.startTime);
                   const end = toDateMaybe(s.endTime);
                   const duration = formatDuration(s.startTime, s.endTime);
-                  const name = currentMemberFor(s, usersMap)?.fullName || currentMemberFor(s, usersMap)?.name || 'Unknown';
-                  const m = getMembershipStatus(currentMemberFor(s, usersMap));
+                  const name = memberFromSession(s)?.fullName || memberFromSession(s)?.name || 'Unknown';
+                  const m = getMembershipStatus(memberFromSession(s));
 
                   const capsuleCls =
                     m.code === 'active' ? 'bg-emerald-100 text-emerald-700'
@@ -702,12 +694,12 @@ function SessionsPanel({
                       </td>
                       <td className="px-2 py-1 text-right">
                         <QuickManageMenu
-                          member={currentMemberFor(s, usersMap)}
+                          member={memberFromSession(s)}
                           status={m}
-                          onRenew={() => onRenew(currentMemberFor(s, usersMap))}
-                          onExtend={() => onExtend(currentMemberFor(s, usersMap))}
-                          onEndNow={() => onEndNow(currentMemberFor(s, usersMap))}
-                          onClearSub={() => onClearSub(currentMemberFor(s, usersMap))}
+                          onRenew={() => onRenew(memberFromSession(s))}
+                          onExtend={() => onExtend(memberFromSession(s))}
+                          onEndNow={() => onEndNow(memberFromSession(s))}
+                          onClearSub={() => onClearSub(memberFromSession(s))}
                         />
                       </td>
                     </tr>
@@ -763,8 +755,8 @@ function QuickManageMenu({ member, status, onRenew, onExtend, onEndNow, onClearS
 function SessionCard({ s, usersMap, formatDuration, readableType, onOpen, onRenew, onExtend, onEndNow, onClearSub }) {  const start = toDateMaybe(s.startTime);
   const end = toDateMaybe(s.endTime);
   const duration = formatDuration(s.startTime, s.endTime);
-  const name = currentMemberFor(s, usersMap)?.fullName || currentMemberFor(s, usersMap)?.name || 'Unknown';
-  const m = getMembershipStatus(currentMemberFor(s, usersMap));
+  const name = memberFromSession(s)?.fullName || memberFromSession(s)?.name || 'Unknown';
+  const m = getMembershipStatus(memberFromSession(s));
 
   const capsuleCls =
     m.code === 'active' ? 'bg-emerald-100 text-emerald-700'
@@ -801,20 +793,20 @@ function SessionCard({ s, usersMap, formatDuration, readableType, onOpen, onRene
       <div className="flex justify-end gap-2">
         <button
           className="rounded-full px-3 py-1.5 text-xs font-semibold bg-blue-500 text-white hover:bg-blue-600"
-          onClick={(e) => { e.stopPropagation(); onRenew(currentMemberFor(s, usersMap)); }}
+          onClick={(e) => { e.stopPropagation(); onRenew(memberFromSession(s)); }}
         >
           Renew
         </button>
         <button
           className="rounded-full px-3 py-1.5 text-xs font-semibold bg-slate-200 hover:bg-slate-300"
-          onClick={(e) => { e.stopPropagation(); onExtend(currentMemberFor(s, usersMap)); }}
+          onClick={(e) => { e.stopPropagation(); onExtend(memberFromSession(s)); }}
           disabled={m.code === 'inactive'}
         >
           +1 cycle
         </button>
         <button
           className="rounded-full px-3 py-1.5 text-xs font-semibold bg-rose-100 text-rose-700 hover:bg-rose-200"
-          onClick={(e) => { e.stopPropagation(); onEndNow(currentMemberFor(s, usersMap)); }}
+          onClick={(e) => { e.stopPropagation(); onEndNow(memberFromSession(s)); }}
           disabled={m.code !== 'active'}
         >
           End now

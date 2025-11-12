@@ -1,5 +1,5 @@
 import './globals.css';
-import { UserProvider } from './context/UserContext';
+import AppProviders from './AppProviders';
 
 export const metadata = {
   title: 'GoCreate Nova',
@@ -9,10 +9,10 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body className="relative min-h-screen bg-gradient-to-br from-white via-slate-100 to-white text-slate-900">
-        <UserProvider>
+      <body>
+        <AppProviders>
           {children}
-        </UserProvider>
+        </AppProviders>
       </body>
     </html>
   );

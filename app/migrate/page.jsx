@@ -7,19 +7,20 @@ import {
   collection,
   getDocs,
   setDoc,
-  addDoc,
   deleteDoc,
   doc,
   query,
   where,
   serverTimestamp,
-  updateDoc,
-  arrayUnion,
 } from 'firebase/firestore';
-import { app } from '../lib/firebase';
+import { app, rtdb } from '../lib/firebase';
 import { Trash2, RefreshCw } from 'lucide-react';
+import { ref as rRef, set as rSet } from 'firebase/database';
+import { updateLocalBadgeIndex } from '../lib/badgeLookup';
 
-// 🔹 Normalize membership type
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers (normalize + safety)
+// ─────────────────────────────────────────────────────────────────────────────
 function normalizeMembershipType(rawType) {
   const s = (rawType || '').toLowerCase();
   if (s.includes('assistance')) return 'assistance';
@@ -30,34 +31,62 @@ function normalizeMembershipType(rawType) {
   return 'regular';
 }
 
-// 🔹 Ensure superadmin role exists
-async function ensureSuperadminRole(db) {
-  const rolesSnap = await getDocs(collection(db, 'roles'));
-  const existing = rolesSnap.docs.find(
-    (d) => (d.data().name || '').toLowerCase() === 'superadmin'
+function numOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function cleanPhone(p) {
+  return (p || '').replace(/[^0-9]/g, '');
+}
+
+// Ensure a role exists (by name). Returns roleId.
+async function ensureRoleByName(db, name, permissions = [], extras = {}) {
+  const snap = await getDocs(collection(db, 'roles'));
+  const existing = snap.docs.find(
+    (d) => (d.data().name || '').toLowerCase() === String(name).toLowerCase()
   );
   if (existing) return existing.id;
 
   const ref = doc(collection(db, 'roles'));
   await setDoc(ref, {
     id: ref.id,
-    name: 'superadmin',
-    permissions: [
-      'createMember',
-      'editRoles',
-      'viewPayments',
-      'viewSessions',
-      'viewUsers',
-      'manageInventory',
-      'createReservations',
-      'assignCertifications',
-    ],
-    protected: false,
-    isDefault: false,
+    name,
+    permissions: Array.isArray(permissions) ? permissions : [],
+    protected: !!extras.protected,
+    isDefault: !!extras.isDefault,
+    createdAt: serverTimestamp(),
   });
   return ref.id;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TXT parser (same contract as yours, slightly safer)
+// Each line: name,email,phone,membershipType,created,expiry
+// ─────────────────────────────────────────────────────────────────────────────
+async function parseText(file) {
+  const res = await fetch(file);
+  if (!res.ok) throw new Error(`File not found: ${file}`);
+  const text = await res.text();
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const records = [];
+
+  for (const line of lines) {
+    const parts = line.split(',').map((p) => p.trim());
+    if (parts.length >= 6) {
+      const expiry = parts.pop();
+      const created = parts.pop();
+      const membershipType = parts.pop();
+      const [name, email, phone] = parts;
+      records.push({ name, email, phone, membershipType, created, expiry });
+    }
+  }
+  return records;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Component
+// ─────────────────────────────────────────────────────────────────────────────
 export default function MigratePage() {
   const db = getFirestore(app);
   const [status, setStatus] = useState('idle');
@@ -67,137 +96,166 @@ export default function MigratePage() {
 
   const log = (msg) => setLogs((p) => [...p, msg]);
 
-  // 🔹 Parse txt file (clean version)
-  const parseText = async (file) => {
-    const res = await fetch(file);
-    if (!res.ok) throw new Error(`File not found: ${file}`);
-    const text = await res.text();
-    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-    const records = [];
-
-    for (const line of lines) {
-      const parts = line.split(',').map((p) => p.trim());
-      if (parts.length >= 6) {
-        const expiry = parts.pop();
-        const created = parts.pop();
-        const membershipType = parts.pop();
-        const [name, email, phone] = parts;
-        records.push({ name, email, phone, membershipType, created, expiry });
-      }
-    }
-    return records;
-  };
-
-  // 🔹 Main import function
+  // Core import (clear = destructive refresh)
   const importUsers = async (records, clear = false) => {
     setRunning(true);
     setLogs([]);
     setStatus(clear ? '🧹 Clearing old users…' : '🔄 Updating users…');
 
-    const now = Math.floor(Date.now() / 1000);
-    const memberRoleId = 'XTCAvQEpCHBN09plzkrj';
-    const memberRole = { id: memberRoleId, name: 'member' };
+    // Ensure baseline roles
+    const memberRoleId = await ensureRoleByName(db, 'member', [
+      // Reasonable base permissions for members (read-only app actions)
+      'viewSelf',
+      'checkin',
+      'viewClasses',
+      'createReservations',
+      'checkoutTools',
+    ], { isDefault: true });
 
-    // optional cleanup
+    // Optional destructive cleanup
     if (clear) {
       const usersSnap = await getDocs(collection(db, 'users'));
-      for (const d of usersSnap.docs) await deleteDoc(doc(db, 'users', d.id));
+      for (const d of usersSnap.docs) {
+        await deleteDoc(doc(db, 'users', d.id));
+      }
       const paySnap = await getDocs(collection(db, 'payments'));
-      for (const d of paySnap.docs) await deleteDoc(doc(db, 'payments', d.id));
+      for (const d of paySnap.docs) {
+        await deleteDoc(doc(db, 'payments', d.id));
+      }
       log('✅ Cleared existing users and payments');
     }
 
     setProgress({ done: 0, total: records.length });
 
+    // Per user: 1 read (lookup by email) + 1 write (create/merge)
     for (let i = 0; i < records.length; i++) {
       const r = records[i];
       try {
-        const cleanPhone = (r.phone || '').replace(/[^0-9]/g, '');
-        const type = normalizeMembershipType(r.membershipType);
-        const createdSec = Number(r.created);
-        const expirySec = Number(r.expiry);
-
-        const qUser = query(collection(db, 'users'), where('email', '==', r.email));
-        const snapUser = await getDocs(qUser);
-
-        let userRef;
-        if (snapUser.empty) {
-          userRef = doc(collection(db, 'users'));
-          await setDoc(userRef, {
-            id: userRef.id,
-            fullName: r.name,
-            email: r.email,
-            phone: cleanPhone,
-            membershipType: type,
-            createdAt: createdSec,
-            expiresAt: expirySec,
-            importedAt: serverTimestamp(),
-            roles: [memberRole],
-          });
-          log(`🆕 Added ${r.name}`);
-        } else {
-          userRef = snapUser.docs[0].ref;
-          await setDoc(
-            userRef,
-            {
-              fullName: r.name,
-              phone: cleanPhone,
-              membershipType: type,
-              expiresAt: expirySec,
-              roles: [memberRole],
-            },
-            { merge: true }
-          );
-          log(`🔄 Updated ${r.name}`);
+        const email = (r.email || '').toLowerCase();
+        if (!email) {
+          log(`⚠️ Skipped (missing email): ${r.name || '(no name)'}`);
+          setProgress({ done: i + 1, total: records.length });
+          continue;
         }
 
-        // update roles/member.users for tracking
-        await updateDoc(doc(db, 'roles', memberRoleId), {
-          users: arrayUnion({ fullName: r.name, id: userRef.id }),
-        });
+        const type = normalizeMembershipType(r.membershipType);
+        const createdSec = numOrNull(r.created);
+        const expirySec = numOrNull(r.expiry);
+        const phone = cleanPhone(r.phone);
 
+        // 1 read — find existing by email
+        const qUser = query(collection(db, 'users'), where('email', '==', email));
+        const snapUser = await getDocs(qUser);
+
+        // Build user payload – align with live app expectations
+        const baseUser = {
+          fullName: r.name || '',
+          email,
+          phone,
+          membershipType: type,
+          // roles as IDs (app tolerates strings or objects; we prefer IDs)
+          roles: [memberRoleId],
+          // Preferred field used by getMembershipStatus()
+          activeSubscription: expirySec
+            ? {
+                name: 'Member',
+                planId: type,
+                cycle: 'monthly',
+                expiresAt: expirySec, // number (unix seconds) is OK
+              }
+            : null,
+          // Legacy compatibility (also read by getMembershipStatus as fallback)
+          membershipExpiresAt: expirySec || null,
+          // Preserve original import timestamps if provided; also mark importedAt
+          createdAt: createdSec || null,
+          importedAt: serverTimestamp(),
+        };
+
+        if (snapUser.empty) {
+          const userRef = doc(collection(db, 'users'));
+          await setDoc(userRef, { id: userRef.id, ...baseUser });
+          log(`🆕 Added ${baseUser.fullName || email}`);
+        } else {
+          const userRef = snapUser.docs[0].ref;
+          await setDoc(userRef, baseUser, { merge: true });
+          log(`🔄 Updated ${baseUser.fullName || email}`);
+        }
       } catch (err) {
-        log(`❌ ${r.name}: ${err.message}`);
+        log(`❌ ${r.name || r.email || '(unknown)'}: ${err.message}`);
       }
       setProgress({ done: i + 1, total: records.length });
     }
 
-    // 🔹 Ensure superadmin account
-    const superRoleId = await ensureSuperadminRole(db);
-    const superEmail = 'denzelnyatsanza@gmail.com';
-    const qSuper = query(collection(db, 'users'), where('email', '==', superEmail));
-    const snapSuper = await getDocs(qSuper);
-    if (snapSuper.empty) {
-      const ref = doc(collection(db, 'users'));
-      await setDoc(ref, {
-        id: ref.id,
+    // Ensure superadmin role + account (with badge and index sync)
+    try {
+      const superRoleId = await ensureRoleByName(db, 'superadmin', [
+        'createMember',
+        'editRoles',
+        'viewPayments',
+        'viewSessions',
+        'viewUsers',
+        'manageInventory',
+        'createReservations',
+        'assignCertifications',
+        'checkin',
+      ], { protected: true });
+
+      const superEmail = 'denzelnyatsanza@gmail.com';
+      const qSuper = query(collection(db, 'users'), where('email', '==', superEmail));
+      const snapSuper = await getDocs(qSuper);
+
+      const superBadge = { id: '23143', badgeNumber: 23143, doorNumber: 'Admin' };
+      const superBase = {
         fullName: 'Denzel Nyatsanza',
         email: superEmail,
         phone: '3167496125',
-        badge: { id: '23143', doorNumber: 'Admin' },
-        roles: [{ id: superRoleId, name: 'superadmin' }],
+        roles: [superRoleId],
         membershipType: 'admin',
-        createdAt: Math.floor(Date.now() / 1000),
-      });
-      log('🌟 Created Superadmin account + badge 23143');
-    } else {
-      const ref = snapSuper.docs[0].ref;
-      await setDoc(
-        ref,
-        {
-          roles: [{ id: superRoleId, name: 'superadmin' }],
-          badge: { id: '23143', doorNumber: 'Admin' },
+        activeSubscription: {
+          name: 'Admin',
+          planId: 'admin',
+          cycle: 'monthly',
+          // keep it effectively "non-blocking" (one year from now)
+          expiresAt: Math.floor(Date.now() / 1000) + 365 * 24 * 3600,
         },
-        { merge: true }
-      );
-      log('🌟 Updated Superadmin roles/badge for Denzel');
+        membershipExpiresAt: Math.floor(Date.now() / 1000) + 365 * 24 * 3600,
+        badge: superBadge,
+        importedAt: serverTimestamp(),
+      };
+
+      let superId;
+      if (snapSuper.empty) {
+        const ref = doc(collection(db, 'users'));
+        await setDoc(ref, { id: ref.id, ...superBase });
+        superId = ref.id;
+        log('🌟 Created Superadmin account + badge 23143');
+      } else {
+        const ref = snapSuper.docs[0].ref;
+        await setDoc(ref, superBase, { merge: true });
+        superId = snapSuper.docs[0].id;
+        log('🌟 Updated Superadmin roles/badge for Denzel');
+      }
+
+      // Keep badge index hot (RTDB + local in-memory/LS index)
+      try {
+        await rSet(rRef(rtdb, `badgeIndex/${superBadge.id}`), superId);
+      } catch (e) {
+        log(`⚠️ RTDB badge index write failed (superadmin): ${e.message}`);
+      }
+      try {
+        updateLocalBadgeIndex(superId, superBadge.id);
+      } catch (e) {
+        // local index best-effort
+      }
+    } catch (e) {
+      log(`❌ Superadmin ensure failed: ${e.message}`);
     }
 
     setStatus('✅ Migration Complete');
     setRunning(false);
   };
 
-  // 🔹 UI
+  // UI
   return (
     <div className="min-h-screen bg-gradient-to-br from-white via-slate-100 to-white p-10">
       <motion.div
@@ -264,7 +322,7 @@ export default function MigratePage() {
                 />
               </div>
               <div className="text-xs text-slate-600 max-h-60 overflow-y-auto font-mono">
-                {logs.slice(-100).map((l, i) => (
+                {logs.slice(-200).map((l, i) => (
                   <div key={i}>{l}</div>
                 ))}
               </div>

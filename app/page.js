@@ -35,6 +35,7 @@ import {
 
 import { app } from './lib/firebase';
 import { useUser } from './context/UserContext';
+import { findUserByBadge, updateLocalBadgeIndex } from './lib/badgeLookup';
 
 // —————————————————————————————————————————————
 // Helpers
@@ -277,90 +278,106 @@ export default function NovaPublicHome() {
   };
 
   const handleScan = async (code) => {
-    try {
-      const badgeCode = clamp5(code);
-      if (badgeCode.length !== 5) return;
+  try {
+    const badgeCode = clamp5(code);
+    if (badgeCode.length !== 5) return;
 
-      const usersCol = collection(db, 'users');
-      const asString = String(badgeCode);
-      const asNumber = Number(badgeCode);
+    // prefer context users; fall back to localUsers
+    const pool = (Array.isArray(allUsers) && allUsers.length > 0) ? allUsers : localUsers;
 
-      const fields = ['badge.id', 'badge.badgeNumber'];
-      let hit = null;
+    // ZERO-READ fast path via badge index + pool; at worst 1 read fallback
+    const hit = await findUserByBadge(badgeCode, {
+      userPool: pool,
+      allowFirestoreFallback: true,
+      allowDirectWhereQuery: false, // keep it at max 1 read
+    });
 
-      for (const field of fields) {
-        for (const val of [asString, asNumber]) {
-          try {
-            const qs = query(usersCol, where(field, '==', val), fsLimit(1));
-            const snap = await getDocs(qs);
-            if (!snap.empty) { hit = snap.docs[0]; break; }
-          } catch (e) { console.warn(`Lookup failed on ${field} == ${val}`, e); }
-        }
-        if (hit) break;
-      }
-
-      if (!hit) {
-        const ref = await addDoc(collection(db, 'scans'), {
-          badgeCode, matchedUserId: null, user: null, status: 'not_found',
-          createdAt: serverTimestamp(), kioskId,
-        });
-        setPendingScanId(ref.id);
-        setPendingBadgeCode(badgeCode);
-        openRelinkModal();
-        return;
-      }
-
-      const data = hit.data() || {};
-      const matchedUserMinimal = { id: hit.id, name: data.fullName || data.name || '', photoURL: data.photoURL || null };
-
-      // evaluate membership
-      const status = getMembershipStatus(data);
-
-      if (status.code === 'active') {
-        // log scan first
-        const scanRef = await addDoc(collection(db, 'scans'), {
-          badgeCode, matchedUserId: hit.id, user: matchedUserMinimal, status: 'matched',
-          createdAt: serverTimestamp(), kioskId,
-        });
-
-        // warn when ≤ 7 days left
-        const daysLeft = status.expiresAt ? Math.ceil((toDateSafe(status.expiresAt) - new Date()) / 86400000) : 9999;
-        if (daysLeft <= 7) {
-          setHeadsUp({ user: { id: hit.id, ...data }, status, scanId: scanRef.id });
-          setPendingBadgeCode(badgeCode);
-          setPendingScanId(scanRef.id);
-          return;
-        }
-
-        // normal pass-through
-        proceedToCheckin(hit.id, data);
-        return;
-      }
-
-      // expired or inactive -> BLOCK + friendly modal
-      const blockStatus = status.code === 'expired' ? 'blocked_membership_expired' : 'blocked_membership_inactive';
-      const scanRef = await addDoc(collection(db, 'scans'), {
-        badgeCode, matchedUserId: hit.id, user: matchedUserMinimal, status: blockStatus,
-        createdAt: serverTimestamp(), kioskId,
+    if (!hit) {
+      const ref = await addDoc(collection(db, 'scans'), {
+        badgeCode,
+        matchedUserId: null,
+        user: null,
+        status: 'not_found',
+        createdAt: serverTimestamp(),
+        kioskId,
       });
-      setBlockInfo({ user: { id: hit.id, ...data }, status, scanId: scanRef.id });
-      setPendingScanId(scanRef.id);
+      setPendingScanId(ref.id);
       setPendingBadgeCode(badgeCode);
-      return;
-    } catch (err) {
-      console.error('Scan lookup error:', err);
-      try {
-        const ref = await addDoc(collection(db, 'scans'), {
-          badgeCode: clamp5(code) || null, matchedUserId: null, user: null,
-          status: 'error', errorMessage: String(err?.message || err),
-          createdAt: serverTimestamp(), kioskId,
-        });
-        setPendingScanId(ref.id);
-        setPendingBadgeCode(clamp5(code));
-      } catch (_) {}
       openRelinkModal();
+      return;
     }
-  };
+
+    const userDoc = hit; // already { id, ...data }
+    const matchedUserMinimal = {
+      id: userDoc.id,
+      name: userDoc.fullName || userDoc.name || '',
+      photoURL: userDoc.photoURL || null,
+    };
+
+    // membership evaluation
+    const status = getMembershipStatus(userDoc);
+
+    if (status.code === 'active') {
+      const scanRef = await addDoc(collection(db, 'scans'), {
+        badgeCode,
+        matchedUserId: userDoc.id,
+        user: matchedUserMinimal,
+        status: 'matched',
+        createdAt: serverTimestamp(),
+        kioskId,
+      });
+
+      const daysLeft = status.expiresAt
+        ? Math.ceil((toDateSafe(status.expiresAt) - new Date()) / 86400000)
+        : 9999;
+
+      if (daysLeft <= 7) {
+        setHeadsUp({ user: { id: userDoc.id, ...userDoc }, status, scanId: scanRef.id });
+        setPendingBadgeCode(badgeCode);
+        setPendingScanId(scanRef.id);
+        return;
+      }
+
+      proceedToCheckin(userDoc.id, userDoc);
+      return;
+    }
+
+    // expired or inactive
+    const blockStatus =
+      status.code === 'expired' ? 'blocked_membership_expired' : 'blocked_membership_inactive';
+
+    const scanRef = await addDoc(collection(db, 'scans'), {
+      badgeCode,
+      matchedUserId: userDoc.id,
+      user: matchedUserMinimal,
+      status: blockStatus,
+      createdAt: serverTimestamp(),
+      kioskId,
+    });
+
+    setBlockInfo({ user: { id: userDoc.id, ...userDoc }, status, scanId: scanRef.id });
+    setPendingScanId(scanRef.id);
+    setPendingBadgeCode(badgeCode);
+    return;
+  } catch (err) {
+    console.error('Scan lookup error:', err);
+    try {
+      const ref = await addDoc(collection(db, 'scans'), {
+        badgeCode: clamp5(code) || null,
+        matchedUserId: null,
+        user: null,
+        status: 'error',
+        errorMessage: String(err?.message || err),
+        createdAt: serverTimestamp(),
+        kioskId,
+      });
+      setPendingScanId(ref.id);
+      setPendingBadgeCode(clamp5(code));
+    } catch (_) {}
+    openRelinkModal();
+  }
+};
+
 
   // —————————————————————————————————————————————
   // RELINK / WIZARD HELPERS
@@ -411,17 +428,18 @@ export default function NovaPublicHome() {
     }
   };
 
-  const ensureUsersLoaded = async () => {
-    if (Array.isArray(allUsers) && allUsers.length > 0) return;
-    if (localUsers.length > 0) return;
-    try {
-      const snap = await getDocs(collection(db, 'users'));
-      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setLocalUsers(list);
-    } catch (e) {
-      console.warn('Fallback user fetch failed', e);
-    }
-  };
+const ensureUsersLoaded = async () => {
+  if (Array.isArray(allUsers) && allUsers.length > 0) return;
+  if (localUsers.length > 0) return;
+  try {
+    const snap = await getDocs(collection(db, 'users'));
+    const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    setLocalUsers(list);
+  } catch (e) {
+    console.warn('Fallback user fetch failed', e);
+  }
+};
+
 
   const openWizard = async () => {
     try {
@@ -473,69 +491,77 @@ export default function NovaPublicHome() {
   };
 
   // Link badge in wizard — then apply same membership gate
-  const linkBadgeToUser = async () => {
-    if (!selectedUser || !pendingBadgeCode) return;
-    setLinking(true);
-    try {
-      const userRef = doc(db, 'users', selectedUser.id);
-      await updateDoc(userRef, {
-        badge: {
-          id: String(pendingBadgeCode),
-          badgeNumber: Number(pendingBadgeCode),
-          linkedAt: serverTimestamp(),
-          kioskId,
-        },
+ const linkBadgeToUser = async () => {
+  if (!selectedUser || !pendingBadgeCode) return;
+  setLinking(true);
+  try {
+    const userRef = doc(db, 'users', selectedUser.id);
+    await updateDoc(userRef, {
+      badge: {
+        id: String(pendingBadgeCode),
+        badgeNumber: Number(pendingBadgeCode),
+        linkedAt: serverTimestamp(),
+        kioskId,
+      },
+    });
+
+    // keep local zero-read index instantly hot
+    updateLocalBadgeIndex(selectedUser.id, pendingBadgeCode);
+
+    if (pendingScanId) {
+      await updateDoc(doc(db, 'scans', pendingScanId), {
+        matchedUserId: selectedUser.id,
+        user: { id: selectedUser.id, name: selectedUser.name, photoURL: selectedUser.photoURL || null },
+        status: 'relinked',
+        relinkedAt: serverTimestamp(),
       });
+    } else {
+      const ref = await addDoc(collection(db, 'scans'), {
+        badgeCode: pendingBadgeCode,
+        matchedUserId: selectedUser.id,
+        user: { id: selectedUser.id, name: selectedUser.name, photoURL: selectedUser.photoURL || null },
+        status: 'relinked',
+        createdAt: serverTimestamp(),
+        kioskId,
+      });
+      setPendingScanId(ref.id);
+    }
 
-      if (pendingScanId) {
-        await updateDoc(doc(db, 'scans', pendingScanId), {
-          matchedUserId: selectedUser.id,
-          user: { id: selectedUser.id, name: selectedUser.name, photoURL: selectedUser.photoURL || null },
-          status: 'relinked',
-          relinkedAt: serverTimestamp(),
-        });
-      } else {
-        const ref = await addDoc(collection(db, 'scans'), {
-          badgeCode: pendingBadgeCode,
-          matchedUserId: selectedUser.id,
-          user: { id: selectedUser.id, name: selectedUser.name, photoURL: selectedUser.photoURL || null },
-          status: 'relinked',
-          createdAt: serverTimestamp(),
-          kioskId,
-        });
-        setPendingScanId(ref.id);
-      }
+    const enriched = { ...selectedUser, badge: { id: String(pendingBadgeCode), badgeNumber: Number(pendingBadgeCode) } };
+    localStorage.setItem('nova-user', JSON.stringify(enriched));
+    setCurrentUser(enriched);
 
-      const enriched = { ...selectedUser, badge: { id: String(pendingBadgeCode) } };
-      localStorage.setItem('nova-user', JSON.stringify(enriched));
-      setCurrentUser(enriched);
+    const status = getMembershipStatus(enriched);
+    if (status.code !== 'active') {
+      setBlockInfo({ user: enriched, status, scanId: pendingScanId });
+      setShowWizard(false);
+      setShowRelinkModal(false);
+      setLinkDone(false);
+      return;
+    }
 
-      // Gate after linking
-      const status = getMembershipStatus(enriched);
-      if (status.code !== 'active') {
-        setBlockInfo({ user: enriched, status, scanId: pendingScanId });
-        setShowWizard(false);
-        setShowRelinkModal(false);
-        setLinkDone(false);
-        return;
-      }
-      // If active but close to expiring, show heads-up; else proceed
-      const daysLeft = status.expiresAt ? Math.ceil((toDateSafe(status.expiresAt) - new Date()) / 86400000) : 9999;
-      if (daysLeft <= 7) {
-        setHeadsUp({ user: enriched, status, scanId: pendingScanId });
-        setShowWizard(false);
-        setShowRelinkModal(false);
-        setLinkDone(false);
-        return;
-      }
+    const daysLeft = status.expiresAt
+      ? Math.ceil((toDateSafe(status.expiresAt) - new Date()) / 86400000)
+      : 9999;
 
-      setLinkDone(true);
-      setTimeout(() => router.replace('/checkin'), 700);
-    } catch (e) {
-      console.error('Badge link error:', e);
-      alert('We hit a snag linking that badge. Please try again or ask the front desk.');
-    } finally { setLinking(false); }
-  };
+    if (daysLeft <= 7) {
+      setHeadsUp({ user: enriched, status, scanId: pendingScanId });
+      setShowWizard(false);
+      setShowRelinkModal(false);
+      setLinkDone(false);
+      return;
+    }
+
+    setLinkDone(true);
+    setTimeout(() => router.replace('/checkin'), 700);
+  } catch (e) {
+    console.error('Badge link error:', e);
+    alert('We hit a snag linking that badge. Please try again or ask the front desk.');
+  } finally {
+    setLinking(false);
+  }
+};
+
 
   // —————————————————————————————————————————————
   // UI

@@ -1,6 +1,16 @@
+// app/firebase.js
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import {
+  getAuth,
+  indexedDBLocalPersistence,
+  setPersistence,
+} from "firebase/auth";
+import {
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+} from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 import { getDatabase } from "firebase/database";
 
@@ -15,10 +25,31 @@ const firebaseConfig = {
   measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
 };
 
+// Singleton app
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
+// ---- Auth (persist to IndexedDB) ----
 const auth = getAuth(app);
-const db = getFirestore(app);
+setPersistence(auth, indexedDBLocalPersistence).catch(() => {
+  // non-fatal; fall back to default if IndexedDB blocked
+});
+
+// ---- Firestore with durable local cache + multi-tab coherence ----
+let db;
+if (typeof window !== "undefined") {
+  // Must be called before any getFirestore() usage
+  db = initializeFirestore(app, {
+    localCache: persistentLocalCache({
+      tabManager: persistentMultipleTabManager(), // multi-tab safe
+    }),
+    ignoreUndefinedProperties: true,
+  });
+} else {
+  // SSR/Node paths won’t use persistence
+  db = getFirestore(app);
+}
+
+// ---- Other services ----
 const storage = getStorage(app);
 const rtdb = getDatabase(app);
 
