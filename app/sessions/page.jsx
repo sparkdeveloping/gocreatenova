@@ -17,7 +17,8 @@ import {
   addDoc,
   serverTimestamp,
 } from 'firebase/firestore';
-import { app } from '../lib/firebase';
+import { app, rtdb } from '../lib/firebase';
+import { ref as rRef, set as rSet } from 'firebase/database';
 
 import {
   BadgeCheck,
@@ -45,6 +46,8 @@ import { ViewToggleButton } from '@/app/components/ui/ToolbarButtons';
 import StatBox from '@/app/components/ui/StatBox';
 
 import { useEmployeeRoleIndex, userIsEmployee } from '@/app/lib/employeeRoles';
+import { useUsersMapOnce } from '../lib/loadOnce';
+import { updateLocalBadgeIndex } from '../lib/badgeLookup';
 
 // —————————————————————————————————————————————
 // Date + membership helpers
@@ -72,20 +75,48 @@ function addCycle(date, cycle) {
 
 function getMembershipStatus(user) {
   const now = new Date();
-  const sub = user?.activeSubscription || null; // { planId, name, cycle, startedAt, expiresAt, status }
-  const expiresAt = toDateSafe(sub?.expiresAt);
+  const sub = user?.activeSubscription || null;
+  const expiresAt =
+    toDateSafe(sub?.expiresAt) ||
+    toDateSafe(user?.membershipExpiresAt) ||
+    null;
+
   const hadAny =
     !!sub ||
     (Array.isArray(user?.subscriptions) && user.subscriptions.length > 0) ||
-    !!toDateSafe(user?.membershipExpiresAt);
+    !!expiresAt;
 
   if (expiresAt && expiresAt > now) {
-    return { label: 'Active', code: 'active', expiresAt, hadAny, planName: sub?.name || null, planId: sub?.planId || null, cycle: sub?.cycle || 'monthly' };
+    return {
+      label: 'Active',
+      code: 'active',
+      expiresAt,
+      hadAny,
+      planName: sub?.name || null,
+      planId: sub?.planId || null,
+      cycle: sub?.cycle || 'monthly',
+    };
   }
   if (hadAny) {
-    return { label: 'Expired', code: 'expired', expiresAt, hadAny, planName: sub?.name || null, planId: sub?.planId || null, cycle: sub?.cycle || 'monthly' };
+    return {
+      label: 'Expired',
+      code: 'expired',
+      expiresAt,
+      hadAny,
+      planName: sub?.name || null,
+      planId: sub?.planId || null,
+      cycle: sub?.cycle || 'monthly',
+    };
   }
-  return { label: 'Inactive', code: 'inactive', expiresAt: null, hadAny: false, planName: null, planId: null, cycle: null };
+  return {
+    label: 'Inactive',
+    code: 'inactive',
+    expiresAt: null,
+    hadAny: false,
+    planName: null,
+    planId: null,
+    cycle: null,
+  };
 }
 
 const byLower = (s) => String(s || '').toLowerCase();
@@ -172,6 +203,9 @@ export default function SessionsPage() {
   const [allUsers, setAllUsers] = useState([]);
   const [assignSearch, setAssignSearch] = useState('');
 
+  // 🔹 Load a *single* usersMap once (minimize reads)
+  const { usersMap } = useUsersMapOnce();
+
   // RT sessions
   useEffect(() => {
     const qSess = query(collection(db, 'sessions'), orderBy('startTime', 'desc'));
@@ -202,7 +236,7 @@ export default function SessionsPage() {
     })();
   }, [db]);
 
-  // Users cache for assign
+  // Users cache for assign (only when modal opens)
   useEffect(() => {
     if (!assignOpen || allUsers.length) return;
     (async () => {
@@ -227,9 +261,13 @@ export default function SessionsPage() {
       setShowDatePicker(true);
     }
   };
-function memberFromSession(s) {
-  return s?.member || {};
-}
+
+  function memberFromSession(s) {
+    const embedded = s?.member || {};
+    const live = embedded?.id ? usersMap[embedded.id] : null;
+    return live ? { ...embedded, ...live } : embedded;
+  }
+
   // filtering
   useEffect(() => {
     let list = [...sessions];
@@ -275,8 +313,8 @@ function memberFromSession(s) {
   }, [sessions, mode, employeeRole, planFilter, searchTerm, dateRange, emp.ids, usersMap]);
 
   // stats
-  const memberCount = useMemo(() => sessions.filter((s) => !userIsEmployee(memberFromSession(s), emp.ids)).length, [sessions, emp.ids]);
-  const employeeCount = useMemo(() => sessions.filter((s) => userIsEmployee(memberFromSession(s), emp.ids)).length, [sessions, emp.ids]);
+  const memberCount = useMemo(() => sessions.filter((s) => !userIsEmployee(memberFromSession(s), emp.ids)).length, [sessions, emp.ids, usersMap]);
+  const employeeCount = useMemo(() => sessions.filter((s) => userIsEmployee(memberFromSession(s), emp.ids)).length, [sessions, emp.ids, usersMap]);
 
   // utils
   const formatDuration = (start, end) => {
@@ -317,17 +355,41 @@ function memberFromSession(s) {
   // assign badge
   const handleAssignToUser = async (user) => {
     if (!selectedScan?.badgeCode || !user?.id) return;
-    const uref = doc(getFirestore(app), 'users', user.id);
-    await updateDoc(uref, {
-      badge: { id: String(selectedScan.badgeCode), badgeNumber: Number(selectedScan.badgeCode) || null },
-    }).catch(() => {});
+
     try {
+      // 1) attach badge to user
+      await updateDoc(doc(db, 'users', user.id), {
+        badge: {
+          id: String(selectedScan.badgeCode),
+          badgeNumber: Number(selectedScan.badgeCode) || null,
+          linkedAt: serverTimestamp(),
+        },
+      });
+
+      // 2) write index (best-effort)
+      try {
+        await rSet(rRef(rtdb, `badgeIndex/${String(selectedScan.badgeCode)}`), user.id);
+      } catch (_) {}
+      try {
+        updateLocalBadgeIndex(user.id, String(selectedScan.badgeCode));
+      } catch (_) {}
+
+      // 3) mark scan as assigned
       if (selectedScan?.id) {
-        await updateDoc(doc(db, 'scans', selectedScan.id), { matchedUserId: user.id, status: 'assigned' });
+        await updateDoc(doc(db, 'scans', selectedScan.id), {
+          matchedUserId: user.id,
+          user: { id: user.id, name: user.fullName || user.name || '', photoURL: user.photoURL || null },
+          status: 'assigned',
+          relinkedAt: serverTimestamp(),
+        });
       }
-    } catch (_) {}
-    setAssignOpen(false);
-    setSelectedScan(null);
+
+      setAssignOpen(false);
+      setSelectedScan(null);
+    } catch (err) {
+      console.error('Assign failed:', err);
+      alert('Could not assign badge — please try again.');
+    }
   };
 
   // lock scroll on modals
@@ -394,7 +456,7 @@ function memberFromSession(s) {
               onRenew={(member) => { setRenewTarget(member); setRenewOpen(true); }}
               onExtend={async (member) => {
                 const sub = member?.activeSubscription;
-                if (!sub) return;
+                if (!sub || !member?.id) return;
                 const next = addCycle(toDateSafe(sub.expiresAt) || new Date(), sub.cycle || 'monthly');
                 await updateDoc(doc(db, 'users', member.id), {
                   'activeSubscription.expiresAt': next,
@@ -519,7 +581,6 @@ function EmptyScans() {
 function currentMemberFor(session, usersMap) {
   const embedded = session?.member || {};
   const live = embedded?.id ? usersMap[embedded.id] : null;
-  // prefer live user (has fresh activeSubscription), but keep fallback name/badge
   return live ? { ...embedded, ...live } : embedded;
 }
 
@@ -636,7 +697,7 @@ function SessionsPanel({
           <div className="grid gap-4 sm:grid-cols-1 md:grid-cols-2">
             {filteredSessions.map((s) => (
               <SessionCard key={s.id} s={s}
-              usersMap={usersMap}
+                usersMap={usersMap}
                 formatDuration={formatDuration} readableType={readableType}
                 onOpen={() => setModalSession(s)}
                 onRenew={onRenew} onExtend={onExtend} onEndNow={onEndNow} onClearSub={onClearSub}
@@ -752,11 +813,13 @@ function QuickManageMenu({ member, status, onRenew, onExtend, onEndNow, onClearS
   );
 }
 
-function SessionCard({ s, usersMap, formatDuration, readableType, onOpen, onRenew, onExtend, onEndNow, onClearSub }) {  const start = toDateMaybe(s.startTime);
+function SessionCard({ s, usersMap, formatDuration, readableType, onOpen, onRenew, onExtend, onEndNow, onClearSub }) {
+  const start = toDateMaybe(s.startTime);
   const end = toDateMaybe(s.endTime);
   const duration = formatDuration(s.startTime, s.endTime);
-  const name = memberFromSession(s)?.fullName || memberFromSession(s)?.name || 'Unknown';
-  const m = getMembershipStatus(memberFromSession(s));
+  const member = currentMemberFor(s, usersMap);
+  const name = member?.fullName || member?.name || 'Unknown';
+  const m = getMembershipStatus(member);
 
   const capsuleCls =
     m.code === 'active' ? 'bg-emerald-100 text-emerald-700'
@@ -793,20 +856,20 @@ function SessionCard({ s, usersMap, formatDuration, readableType, onOpen, onRene
       <div className="flex justify-end gap-2">
         <button
           className="rounded-full px-3 py-1.5 text-xs font-semibold bg-blue-500 text-white hover:bg-blue-600"
-          onClick={(e) => { e.stopPropagation(); onRenew(memberFromSession(s)); }}
+          onClick={(e) => { e.stopPropagation(); onRenew(member); }}
         >
           Renew
         </button>
         <button
           className="rounded-full px-3 py-1.5 text-xs font-semibold bg-slate-200 hover:bg-slate-300"
-          onClick={(e) => { e.stopPropagation(); onExtend(memberFromSession(s)); }}
+          onClick={(e) => { e.stopPropagation(); onExtend(member); }}
           disabled={m.code === 'inactive'}
         >
           +1 cycle
         </button>
         <button
           className="rounded-full px-3 py-1.5 text-xs font-semibold bg-rose-100 text-rose-700 hover:bg-rose-200"
-          onClick={(e) => { e.stopPropagation(); onEndNow(memberFromSession(s)); }}
+          onClick={(e) => { e.stopPropagation(); onEndNow(member); }}
           disabled={m.code !== 'active'}
         >
           End now
@@ -980,7 +1043,6 @@ function RenewMembershipModal({ open, member, subsCatalog, onClose, onSaved }) {
     if (!open || !member) return;
     let pre = member?.activeSubscription?.planId || '';
     if (!pre && Array.isArray(member?.subscriptions) && member.subscriptions.length) {
-      // pick the most recent entry that has a planId
       const last = [...member.subscriptions].reverse().find((s) => s?.planId);
       pre = last?.planId || '';
     }
@@ -993,46 +1055,45 @@ function RenewMembershipModal({ open, member, subsCatalog, onClose, onSaved }) {
   const canSave = !!plan;
 
   const savePaymentAndActivate = async () => {
-  try {
-    const startedAt = new Date();
-    const expiresAt = addCycle(startedAt, plan?.cycle || 'monthly');
+    try {
+      const startedAt = new Date();
+      const expiresAt = addCycle(startedAt, plan?.cycle || 'monthly');
 
-    // 1) record payment
-    await addDoc(collection(db, 'payments'), {
-      type: 'receipt',
-      status: 'paid',
-      method: 'card',
-      externalRef: `sub:${plan.id}`,
-      lines: [{ itemId: plan.id, name: plan.name, qty: 1, unitPrice: Number(plan.price||0), total: Number(plan.price||0) }],
-      total: Number(plan.price || 0),
-      userId: member.id || member.uid || member.userId,      // <-- robust id
-      userName: member.fullName || member.name || '',
-      createdAt: serverTimestamp(),
-      reason: 'membership_renewal',
-    });
+      // 1) record payment
+      await addDoc(collection(db, 'payments'), {
+        type: 'receipt',
+        status: 'paid',
+        method: 'card',
+        externalRef: `sub:${plan.id}`,
+        lines: [{ itemId: plan.id, name: plan.name, qty: 1, unitPrice: Number(plan.price||0), total: Number(plan.price||0) }],
+        total: Number(plan.price || 0),
+        userId: member.id || member.uid || member.userId,
+        userName: member.fullName || member.name || '',
+        createdAt: serverTimestamp(),
+        reason: 'membership_renewal',
+      });
 
-    // 2) activate on user doc
-    const uid = member.id || member.uid || member.userId;
-    if (!uid) throw new Error('No user id on member.');
-    await updateDoc(doc(db, 'users', uid), {
-      activeSubscription: {
-        planId: plan.id,
-        name: plan.name,
-        cycle: plan.cycle || 'monthly',
-        startedAt,
-        expiresAt,
-        status: 'active',
-      },
-    });
+      // 2) activate on user doc
+      const uid = member.id || member.uid || member.userId;
+      if (!uid) throw new Error('No user id on member.');
+      await updateDoc(doc(db, 'users', uid), {
+        activeSubscription: {
+          planId: plan.id,
+          name: plan.name,
+          cycle: plan.cycle || 'monthly',
+          startedAt,
+          expiresAt,
+          status: 'active',
+        },
+        membershipExpiresAt: expiresAt, // legacy field for compatibility
+      });
 
-    // 3) done
-    onSaved && onSaved();
-  } catch (err) {
-    console.error('Renew failed:', err);
-    alert(`Renew failed: ${err?.message || err}`);
-  }
-};
-
+      onSaved && onSaved();
+    } catch (err) {
+      console.error('Renew failed:', err);
+      alert(`Renew failed: ${err?.message || err}`);
+    }
+  };
 
   return (
     <ModalPortal>
