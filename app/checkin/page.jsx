@@ -248,8 +248,97 @@ export default function CheckInPage() {
         </div>
 
         {/* actions grid — (your unified tiles here) */}
+<div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-7">
+
+  {/* Dashboard */}
+  <button
+    onClick={() => router.push('/dashboard')}
+    className="group rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-slate-900/20 via-blue-500/30 to-sky-400/30 shadow-sm"
+  >
+    <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
+      <div className="rounded-2xl bg-slate-900 text-white/95 w-12 h-12 grid place-items-center shadow">
+        <LayoutDashboard className="w-6 h-6" />
+      </div>
+      <div>
+        <div className="font-semibold text-base md:text-lg">Go to Dashboard</div>
+        <div className="text-sm text-slate-500">See your sessions & activity</div>
+      </div>
+    </div>
+  </button>
+
+  {/* My Profile */}
+  <button
+    onClick={() => router.push(`/users/${member?.id || member?.docId}`)}
+    className="group rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-blue-500/25 via-sky-400/25 to-indigo-500/25 shadow-sm"
+  >
+    <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
+      <div className="rounded-2xl bg-blue-600 text-white w-12 h-12 grid place-items-center shadow">
+        <User className="w-6 h-6" />
+      </div>
+      <div>
+        <div className="font-semibold text-base md:text-lg">My Profile</div>
+        <div className="text-sm text-slate-500">Membership & details</div>
+      </div>
+    </div>
+  </button>
+
+  {/* Add Guests (hide for ClockIn) */}
+  {lastSessionType !== 'ClockIn' && (
+    <button
+      onClick={() => router.push('/dashboard?pane=guests')}
+      className="group rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-emerald-500/25 via-teal-400/25 to-green-500/25 shadow-sm"
+    >
+      <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
+        <div className="rounded-2xl bg-emerald-600 text-white w-12 h-12 grid place-items-center shadow">
+          <Users className="w-6 h-6" />
+        </div>
+        <div>
+          <div className="font-semibold text-base md:text-lg">Add Guests</div>
+          <div className="text-sm text-slate-500">Include friends on your visit</div>
+        </div>
+      </div>
+    </button>
+  )}
+
+  {/* That’s everything */}
+  <button
+    onClick={() => router.push('/')}
+    className="group rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-slate-400/25 via-slate-300/25 to-slate-500/25 shadow-sm"
+  >
+    <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
+      <div className="rounded-2xl bg-slate-200 text-slate-800 w-12 h-12 grid place-items-center shadow">
+        <CheckCircle2 className="w-6 h-6" />
+      </div>
+      <div>
+        <div className="font-semibold text-base md:text-lg">That’s everything</div>
+        <div className="text-sm text-slate-500">Return to home</div>
+      </div>
+    </div>
+  </button>
+</div>
 
         {/* full width checkout */}
+        <div className="mt-4">
+  <button
+    onClick={checkOutNow}
+    className="group w-full rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-rose-600/35 via-rose-500/25 to-pink-500/25 shadow-md"
+  >
+    <div className="rounded-[1.15rem] bg-white/70 backdrop-blur-xl border border-white/40 hover:bg-white/90 transition p-5 text-left flex items-center gap-4">
+      <div className="rounded-2xl bg-rose-600 text-white w-12 h-12 grid place-items-center shadow">
+        <CalendarCheck className="w-6 h-6" />
+      </div>
+      <div>
+        <div className="font-semibold text-base md:text-lg">
+          {lastSessionType === 'ClockIn' ? 'Clock Out' : 'Check Out'}
+        </div>
+        <div className="text-sm text-rose-600">
+          {lastSessionType === 'ClockIn' ? 'End your shift' : 'End your visit'}
+        </div>
+      </div>
+    </div>
+  </button>
+</div>
+
         {/* ... your Check/Clock Out button ... */}
 
         <div className="flex justify-end mt-4">
