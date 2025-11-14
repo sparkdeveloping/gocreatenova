@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
-import { motion } from 'framer-motion';
-import { CalendarCheck, User, Users, Plus, MinusCircle } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { CalendarCheck, User, Users, CheckCircle2, LayoutDashboard } from 'lucide-react';
 import {
   getFirestore,
   collection,
@@ -13,6 +13,8 @@ import {
   where,
   getDocs,
   serverTimestamp,
+  updateDoc,
+  doc,
 } from 'firebase/firestore';
 import { app } from '../lib/firebase';
 import Shell from '../components/Shell';
@@ -22,111 +24,116 @@ const db = getFirestore(app);
 
 export default function CheckInPage() {
   const [isEmployee, setIsEmployee] = useState(false);
-  const [showGuestModal, setShowGuestModal] = useState(false);
-  const [guestList, setGuestList] = useState([{ fullName: '', phone: '' }]);
-  // JS version (no TS generics)
-  const [guestStep, setGuestStep] = useState('ask'); // 'ask' | 'list'
   const [currentSessionId, setCurrentSessionId] = useState(null);
-  const [countdown, setCountdown] = useState(10);
+  const [showNextActions, setShowNextActions] = useState(false);
+  const [nextCountdown, setNextCountdown] = useState(14);
+  const [lastSessionType, setLastSessionType] = useState(null); // 'ClockIn' | 'CheckIn' | null
+  const autoStartedRef = useRef(false); // prevent double-creation race
   const router = useRouter();
 
   const { currentUser: member, loading } = useUser();
 
+  // Timer for the "what's next" card
   useEffect(() => {
-    if (!loading && member) {
-      // robust role-name detection (works for strings or {id,name})
-      const roleNames = (member.roles || []).map((r) =>
-        typeof r === 'string' ? r : (r?.name || r?.id || '')
-      );
-      const lower = roleNames.map((n) => n.toLowerCase());
-      setIsEmployee(
-        lower.some((n) => ['tech', 'mentor', 'admin', 'employee', 'staff'].includes(n))
-      );
-
-      // If already has an open session, bounce to dashboard
-      const checkActiveSession = async () => {
-        const qRef = query(
-          collection(db, 'sessions'),
-          where('member.id', '==', member.id),
-          where('endTime', '==', null)
-        );
-        const snapshot = await getDocs(qRef);
-        if (!snapshot.empty) router.push('/dashboard');
-      };
-      checkActiveSession();
-    }
-  }, [loading, member, router]);
-
-  // Auto proceed for members (no guests) with countdown
-  useEffect(() => {
-    if (!member || isEmployee || showGuestModal) return;
+    if (!showNextActions) return;
+    setNextCountdown(14);
     const id = setInterval(() => {
-      setCountdown((prev) => {
-        if (prev <= 1) {
+      setNextCountdown((s) => {
+        if (s <= 1) {
           clearInterval(id);
-          handleMemberGuestDecision(false);
+          router.push('/');
           return 0;
         }
-        return prev - 1;
+        return s - 1;
       });
     }, 1000);
     return () => clearInterval(id);
-  }, [member, isEmployee, showGuestModal]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showNextActions, router]);
 
-  const handleEmployeeClockIn = async () => {
+  // Determine if user is an employee (uses role summary isEmployee flag) and resume any open session
+  useEffect(() => {
+    if (loading || !member) return;
+
+    const rolesArr = Array.isArray(member.roles) ? member.roles : [];
+    const employeeFlag = rolesArr.some((r) =>
+      typeof r === 'object'
+        ? !!r.isEmployee
+        : false // string roles won't be treated as employee unless summaries are normalized
+    );
+
+    setIsEmployee(employeeFlag);
+
+    // Check if there's already an open session
+    (async () => {
+      const qRef = query(
+        collection(db, 'sessions'),
+        where('member.id', '==', member.id || member?.docId),
+        where('endTime', '==', null)
+      );
+      const snapshot = await getDocs(qRef);
+      if (!snapshot.empty) {
+        const s = snapshot.docs[0]?.data();
+        setCurrentSessionId(snapshot.docs[0].id);
+        setLastSessionType(s?.type || null);
+        setShowNextActions(true);
+      }
+    })();
+  }, [loading, member]);
+
+  // Start a session helper
+  const startSession = async (type /* 'CheckIn' | 'ClockIn' */) => {
+    if (!member) return;
     const memberWithId = { ...member, id: member.id || member?.docId };
     const sessionRef = await addDoc(collection(db, 'sessions'), {
       member: memberWithId,
       startTime: serverTimestamp(),
       endTime: null,
-      type: 'ClockIn',
+      type,
     });
     setCurrentSessionId(sessionRef.id);
-    router.push('/dashboard');
+    setLastSessionType(type);
+    setShowNextActions(true);
   };
 
-  const handleEmployeeCheckIn = async () => {
-    const memberWithId = { ...member, id: member.id || member?.docId };
-    const sessionRef = await addDoc(collection(db, 'sessions'), {
-      member: memberWithId,
-      startTime: serverTimestamp(),
-      endTime: null,
-      type: 'CheckIn',
-    });
-    setCurrentSessionId(sessionRef.id);
-    setShowGuestModal(true);
-  };
+  // Auto-start for NON-EMPLOYEES: immediately create a CheckIn and show card.
+  useEffect(() => {
+    if (loading) return;
+    if (!member) return;
+    if (isEmployee) return;        // employees must choose Clock In vs Check In
+    if (showNextActions) return;   // already on card (e.g., resumed open session)
+    if (autoStartedRef.current) return;
 
-  const handleMemberGuestDecision = async (hasGuests) => {
-    const memberWithId = { ...member, id: member.id || member?.docId };
-    const sessionRef = await addDoc(collection(db, 'sessions'), {
-      member: memberWithId,
-      startTime: serverTimestamp(),
-      endTime: null,
-      type: 'CheckIn',
-    });
-    setCurrentSessionId(sessionRef.id);
+    autoStartedRef.current = true;
+    startSession('CheckIn');       // fire-and-forget; UI will switch when setShowNextActions(true)
+  }, [loading, member, isEmployee, showNextActions]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    if (hasGuests) {
-      setShowGuestModal(true);
-      setGuestStep('list');
-    } else {
-      router.push('/dashboard');
-    }
-  };
+  // End the current session, then go home
+  const checkOutNow = async () => {
+    try {
+      let activeId = currentSessionId;
 
-  const completeGuestCheckIn = () => {
-    setShowGuestModal(false);
-    setGuestStep('ask');
-    router.push('/dashboard');
-  };
+      if (!activeId && (member?.id || member?.docId)) {
+        const qRef = query(
+          collection(db, 'sessions'),
+          where('member.id', '==', member.id || member?.docId),
+          where('endTime', '==', null)
+        );
+        const snap = await getDocs(qRef);
+        if (!snap.empty) activeId = snap.docs[0].id;
+      }
 
-  const proceedGuestDecision = (hasGuests) => {
-    if (hasGuests) {
-      setGuestStep('list');
-    } else {
-      setShowGuestModal(false);
-      router.push('/dashboard');
+      if (!activeId) {
+        router.push('/');
+        return;
+      }
+
+      await updateDoc(doc(db, 'sessions', activeId), { endTime: serverTimestamp() });
+      setCurrentSessionId(null);
+      setShowNextActions(false);
+      router.push('/');
+    } catch (e) {
+      console.error('Checkout failed:', e);
+      router.push('/');
     }
   };
 
@@ -161,196 +168,103 @@ export default function CheckInPage() {
           transition={{ duration: 0.8, ease: 'easeOut' }}
           className="relative z-10 backdrop-blur-md bg-white/50 border border-slate-200 rounded-[2rem] shadow-xl w-[90%] max-w-3xl p-10 space-y-6"
         >
-          {/* Employee UI */}
-          {isEmployee && !showGuestModal && (
-            <div className="space-y-5 flex flex-col items-center">
-              <div className="w-[80px] h-[80px] rounded-full overflow-hidden border border-slate-300 shadow-md">
-                <Image
-                  src={member?.profileImageUrl || '/default-avatar.png'}
-                  alt="Employee Avatar"
-                  width={80}
-                  height={80}
-                  className="object-cover"
-                />
-              </div>
-              <h2 className="text-2xl md:text-3xl font-bold text-center">
-                Welcome, {displayName}
-              </h2>
-              <p className="text-sm text-slate-600 text-center max-w-sm">
-                Please select whether you are clocking in for your shift or simply checking in to
-                use resources.
-              </p>
-              <div className="flex gap-6">
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  onClick={handleEmployeeClockIn}
-                  className="flex flex-col items-center justify-center gap-2 bg-white/70 hover:bg-white/80 border border-slate-300 rounded-[1rem] min-w-[140px] min-h-[64px] px-4 py-3 transition shadow-sm text-center"
-                >
-                  <CalendarCheck className="w-7 h-7" />
-                  <span className="text-sm font-medium">Clock In</span>
-                </motion.button>
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  onClick={handleEmployeeCheckIn}
-                  className="flex flex-col items-center justify-center gap-2 bg-white/70 hover:bg-white/80 border border-slate-300 rounded-[1rem] min-w-[140px] min-h-[64px] px-4 py-3 transition shadow-sm text-center"
-                >
-                  <User className="w-7 h-7" />
-                  <span className="text-sm font-medium">Check In</span>
-                </motion.button>
-              </div>
-            </div>
-          )}
+          {/* EMPLOYEE GATE: Only employees see options before a session begins */}
+{isEmployee && !showNextActions && (
+  <div className="space-y-6 flex flex-col items-center">
+    <div className="w-[96px] h-[96px] rounded-full overflow-hidden border border-slate-300 shadow-md grid place-items-center bg-gradient-to-br from-blue-500 to-indigo-500 text-white">
+      <User className="w-10 h-10" />
+    </div>
+    <h2 className="text-3xl font-bold text-center">Welcome, {displayName}</h2>
+    <p className="text-sm text-slate-600 text-center max-w-sm">Are you starting a shift or just visiting?</p>
 
-          {/* Member UI */}
-          {!isEmployee && !showGuestModal && (
-            <div className="space-y-5 flex flex-col items-center">
-              <div className="w-[80px] h-[80px] rounded-full overflow-hidden border border-slate-300 shadow-md">
-                <Image
-                  src={member?.profileImageUrl || '/default-avatar.png'}
-                  alt="Member Avatar"
-                  width={80}
-                  height={80}
-                  className="object-cover"
-                />
-              </div>
-              <h2 className="text-2xl md:text-3xl font-bold text-center">
-                Welcome, {displayName}
-              </h2>
-              <p className="text-sm text-slate-600 text-center max-w-sm">
-                Do you have guests joining you today?
-              </p>
-              <div className="flex gap-6 mt-2">
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  onClick={() => handleMemberGuestDecision(false)}
-                  className="min-w-[140px] min-h-[56px] bg-gray-300 text-slate-800 rounded-[1.5rem] text-base hover:bg-gray-400 transition"
-                >
-                  No
-                </motion.button>
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  onClick={() => handleMemberGuestDecision(true)}
-                  className="min-w-[140px] min-h-[56px] bg-blue-500 text-white rounded-[1.5rem] text-base hover:bg-blue-600 transition"
-                >
-                  Yes
-                </motion.button>
-              </div>
-              <div className="text-xs text-slate-500 mt-4">
-                Auto-proceeding in {countdown} seconds...
-              </div>
-            </div>
-          )}
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-md">
+      <motion.button
+        whileHover={{ scale: 1.03 }}
+        onClick={() => startSession('ClockIn')}
+        className="rounded-[1.3rem] p-[2px] bg-gradient-to-tr from-slate-900/20 via-blue-500/30 to-sky-400/30"
+      >
+        <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
+          <div className="rounded-2xl bg-slate-900 text-white w-12 h-12 grid place-items-center shadow">
+            <CalendarCheck className="w-6 h-6" />
+          </div>
+          <div>
+            <div className="font-semibold text-lg">Clock In</div>
+            <div className="text-sm text-slate-500">Start your shift</div>
+          </div>
+        </div>
+      </motion.button>
+
+      <motion.button
+        whileHover={{ scale: 1.03 }}
+        onClick={() => startSession('CheckIn')}
+        className="rounded-[1.3rem] p-[2px] bg-gradient-to-tr from-blue-500/25 via-sky-400/25 to-indigo-500/25"
+      >
+        <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
+          <div className="rounded-2xl bg-blue-600 text-white w-12 h-12 grid place-items-center shadow">
+            <User className="w-6 h-6" />
+          </div>
+          <div>
+            <div className="font-semibold text-lg">Check In</div>
+            <div className="text-sm text-slate-500">Use resources</div>
+          </div>
+        </div>
+      </motion.button>
+    </div>
+  </div>
+)}
+
         </motion.div>
 
-        {/* Guest modal */}
-        {showGuestModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
-          >
-            <motion.div
-              initial={{ y: 50, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              exit={{ y: 50, opacity: 0 }}
-              className="bg-white/80 backdrop-blur-md rounded-[2rem] p-10 w-full max-w-sm shadow-xl space-y-6 text-center"
-            >
-              {guestStep === 'ask' ? (
-                <>
-                  <Users className="w-12 h-12 text-slate-700 mx-auto mb-2" />
-                  <h3 className="text-lg md:text-xl font-bold">
-                    Do you have guests joining you today?
-                  </h3>
-                  <div className="flex justify-center gap-6 mt-4">
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      onClick={() => proceedGuestDecision(false)}
-                      className="min-w-[140px] min-h-[56px] bg-gray-300 text-slate-800 rounded-[1.5rem] text-base hover:bg-gray-400 transition"
-                    >
-                      No
-                    </motion.button>
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      onClick={() => proceedGuestDecision(true)}
-                      className="min-w-[140px] min-h-[56px] bg-blue-500 text-white rounded-[1.5rem] text-base hover:bg-blue-600 transition"
-                    >
-                      Yes
-                    </motion.button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <h3 className="text-lg md:text-xl font-bold mb-4">Add Guests</h3>
-                  <div className="space-y-2">
-                    {guestList.map((guest, index) => (
-                      <div key={index} className="flex gap-2 items-center w-full">
-                        <div className="flex-1">
-                          <input
-                            type="text"
-                            placeholder="Full Name"
-                            value={guest.fullName}
-                            onChange={(e) => {
-                              const updated = [...guestList];
-                              updated[index].fullName = e.target.value;
-                              setGuestList(updated);
-                            }}
-                            className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm"
-                          />
-                        </div>
-                        <div className="flex-1">
-                          <input
-                            type="tel"
-                            placeholder="Phone"
-                            value={guest.phone}
-                            onChange={(e) => {
-                              const updated = [...guestList];
-                              updated[index].phone = e.target.value;
-                              setGuestList(updated);
-                            }}
-                            className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm"
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const updated = [...guestList];
-                            updated.splice(index, 1);
-                            setGuestList(updated.length ? updated : [{ fullName: '', phone: '' }]);
-                          }}
-                          className="shrink-0"
-                          aria-label="Remove guest"
-                        >
-                          <MinusCircle className="w-5 h-5 text-red-500 hover:text-red-700" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="flex justify-between items-center mt-4">
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      onClick={() =>
-                        setGuestList([...guestList, { fullName: '', phone: '' }])
-                      }
-                      className="flex items-center gap-1 text-sm text-slate-700 hover:text-slate-900"
-                    >
-                      <Plus className="w-4 h-4" />
-                      Add Guest
-                    </motion.button>
+        {/* WHAT'S-NEXT CARD (shows for everyone after session starts or resumes) */}
+        {/* WHAT'S-NEXT CARD: shows for everyone once a session exists */}
+<AnimatePresence>
+  {showNextActions && (
+    <motion.div
+      key="next-actions-overlay"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-transparent"
+    >
+      <motion.div
+        initial={{ y: 24, opacity: 0, scale: 0.98 }}
+        animate={{ y: 0, opacity: 1, scale: 1 }}
+        exit={{ y: 12, opacity: 0, scale: 0.98 }}
+        transition={{ type: 'spring', stiffness: 320, damping: 26 }}
+        className="w-[min(92vw,40rem)] rounded-[2rem] bg-white/85 backdrop-blur-xl border border-white/40 shadow-2xl p-7"
+      >
+        {/* header */}
+        <div className="text-center">
+          <div className="w-16 h-16 rounded-2xl bg-emerald-100 text-emerald-700 grid place-items-center mx-auto mb-3 shadow-sm">
+            <CalendarCheck className="w-8 h-8" />
+          </div>
+          <h3 className="text-2xl font-bold">
+            Hi {member?.fullName || member?.name || 'there'}, you’re {lastSessionType === 'ClockIn' ? 'clocked in' : 'checked in'}!
+          </h3>
+          <p className="text-slate-600 mt-1">
+            What would you like to do next?
+            <span className="ml-2 text-xs text-slate-500">Auto closing in {nextCountdown}s</span>
+          </p>
+        </div>
 
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      onClick={completeGuestCheckIn}
-                      className="bg-blue-500 text-white rounded-[1rem] px-4 py-2 text-sm hover:bg-blue-600 transition"
-                    >
-                      Done
-                    </motion.button>
-                  </div>
-                </>
-              )}
-            </motion.div>
-          </motion.div>
-        )}
+        {/* actions grid — (your unified tiles here) */}
+
+        {/* full width checkout */}
+        {/* ... your Check/Clock Out button ... */}
+
+        <div className="flex justify-end mt-4">
+          <button
+            onClick={() => setShowNextActions(false)}
+            className="px-5 h-12 rounded-full bg-slate-900 text-white text-base font-medium hover:opacity-90"
+          >
+            Close
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  )}
+</AnimatePresence>
+
       </div>
     </Shell>
   );

@@ -164,6 +164,31 @@ function startOfThisWeekSunday(){ const d=startOfToday(); d.setDate(d.getDate()-
 // Page
 export default function SessionsPage() {
   const db = getFirestore(app);
+// Local UI overrides for users (reflect membership changes instantly)
+const [userOverrides, setUserOverrides] = useState({});
+
+const applyUserPatch = (uid, patch) => {
+  if (!uid) return;
+  setUserOverrides((prev) => ({
+    ...prev,
+    [uid]: { ...(prev[uid] || {}), ...patch },
+  }));
+};
+
+// Manual check-in (used by "Check In & Close")
+const manualCheckIn = async (member) => {
+  if (!member?.id) return;
+  const name = member.fullName || member.name || '';
+  const badgeId = member.badge?.id || member.badgeId || null;
+
+  await addDoc(collection(db, 'sessions'), {
+    type: 'Regular',
+    startTime: serverTimestamp(),
+    endTime: null,
+    member: { id: member.id, fullName: name, name, badgeId },
+    createdBy: 'staff_manual',
+  });
+};
 
   // employee roles
   const emp = useEmployeeRoleIndex();
@@ -416,66 +441,119 @@ export default function SessionsPage() {
         {/* LEFT: Last Scans */}
         <div className="md:col-span-1">
           <CardShell>
-            <LastScansCard
-              scans={scans}
-              onAssign={(scan) => { setSelectedScan(scan); setAssignOpen(true); }}
-            />
+ <LastScansCard
+  scans={scans}
+  usersMap={usersMap}
+  userOverrides={userOverrides}
+  onAssign={(scan) => { setSelectedScan(scan); setAssignOpen(true); }}
+  onRenew={(member) => { setRenewTarget(member); setRenewOpen(true); }}
+  onExtend={async (member) => {
+    const sub = member?.activeSubscription;
+    if (!sub || !member?.id) return;
+    const next = addCycle(toDateSafe(sub.expiresAt) || new Date(), sub.cycle || 'monthly');
+    await updateDoc(doc(db, 'users', member.id), {
+      'activeSubscription.expiresAt': next,
+      'activeSubscription.status': 'active',
+      membershipExpiresAt: next,
+    });
+    applyUserPatch(member.id, {
+      activeSubscription: { ...(sub || {}), expiresAt: next, status: 'active' },
+      membershipExpiresAt: next,
+    });
+  }}
+  onEndNow={async (member) => {
+    if (!member?.id) return;
+    const now = new Date();
+    await updateDoc(doc(db, 'users', member.id), {
+      'activeSubscription.status': 'expired',
+      'activeSubscription.expiresAt': now,
+      membershipExpiresAt: now,
+    });
+    const sub = member?.activeSubscription || {};
+    applyUserPatch(member.id, {
+      activeSubscription: { ...(sub || {}), status: 'expired', expiresAt: now },
+      membershipExpiresAt: now,
+    });
+  }}
+  onClearSub={async (member) => {
+    if (!member?.id) return;
+    await updateDoc(doc(db, 'users', member.id), { activeSubscription: null, membershipExpiresAt: null });
+    applyUserPatch(member.id, { activeSubscription: null, membershipExpiresAt: null });
+  }}
+/>
+
+
           </CardShell>
         </div>
 
         {/* RIGHT: Sessions */}
         <div className="md:col-span-2">
           <CardShell>
-            <SessionsPanel
-              filteredSessions={filteredSessions}
-              usersMap={usersMap}
-              mode={mode}
-              setMode={(v) => { setMode(v); setEmployeeRole('all'); }}
-              employeeRole={employeeRole}
-              setEmployeeRole={setEmployeeRole}
-              employeeRoleOptions={employeeRoleOptions}
-              planFilter={planFilter}
-              setPlanFilter={setPlanFilter}
-              planOptions={planOptions}
-              showDatePicker={showDatePicker}
-              setShowDatePicker={setShowDatePicker}
-              dateRange={dateRange}
-              setDateRange={setDateRange}
-              searchTerm={searchTerm}
-              setSearchTerm={setSearchTerm}
-              exportCSV={exportCSV}
-              viewMode={viewMode}
-              setViewMode={setViewMode}
-              memberCount={memberCount}
-              employeeCount={employeeCount}
-              setModalSession={setModalSession}
-              formatDuration={formatDuration}
-              readableType={readableType}
-              quickRange={quickRange}
-              applyQuickRange={applyQuickRange}
-              onRenew={(member) => { setRenewTarget(member); setRenewOpen(true); }}
-              onExtend={async (member) => {
-                const sub = member?.activeSubscription;
-                if (!sub || !member?.id) return;
-                const next = addCycle(toDateSafe(sub.expiresAt) || new Date(), sub.cycle || 'monthly');
-                await updateDoc(doc(db, 'users', member.id), {
-                  'activeSubscription.expiresAt': next,
-                  'activeSubscription.status': 'active',
-                });
-              }}
-              onEndNow={async (member) => {
-                if (!member?.id) return;
-                await updateDoc(doc(db, 'users', member.id), {
-                  'activeSubscription.status': 'expired',
-                  'activeSubscription.expiresAt': new Date(),
-                });
-              }}
-              onClearSub={async (member) => {
-                if (!member?.id) return;
-                await updateDoc(doc(db, 'users', member.id), { activeSubscription: null });
-              }}
-              subsCatalog={subsCatalog}
-            />
+<SessionsPanel
+  filteredSessions={filteredSessions}
+  usersMap={usersMap}
+  userOverrides={userOverrides}
+  mode={mode}
+  setMode={(v) => { setMode(v); setEmployeeRole('all'); }}
+  employeeRole={employeeRole}
+  setEmployeeRole={setEmployeeRole}
+  employeeRoleOptions={employeeRoleOptions}
+  planFilter={planFilter}
+  setPlanFilter={setPlanFilter}
+  planOptions={planOptions}
+  showDatePicker={showDatePicker}
+  setShowDatePicker={setShowDatePicker}
+  dateRange={dateRange}
+  setDateRange={setDateRange}
+  searchTerm={searchTerm}
+  setSearchTerm={setSearchTerm}
+  exportCSV={exportCSV}
+  viewMode={viewMode}
+  setViewMode={setViewMode}
+  memberCount={memberCount}
+  employeeCount={employeeCount}
+  setModalSession={setModalSession}
+  formatDuration={formatDuration}
+  readableType={readableType}
+  quickRange={quickRange}
+  applyQuickRange={applyQuickRange}
+  onRenew={(member) => { setRenewTarget(member); setRenewOpen(true); }}
+  onExtend={async (member) => {
+    const sub = member?.activeSubscription;
+    if (!sub || !member?.id) return;
+    const next = addCycle(toDateSafe(sub.expiresAt) || new Date(), sub.cycle || 'monthly');
+    await updateDoc(doc(db, 'users', member.id), {
+      'activeSubscription.expiresAt': next,
+      'activeSubscription.status': 'active',
+      membershipExpiresAt: next,
+    });
+    applyUserPatch(member.id, {
+      activeSubscription: { ...(sub || {}), expiresAt: next, status: 'active' },
+      membershipExpiresAt: next,
+    });
+  }}
+  onEndNow={async (member) => {
+    if (!member?.id) return;
+    const now = new Date();
+    await updateDoc(doc(db, 'users', member.id), {
+      'activeSubscription.status': 'expired',
+      'activeSubscription.expiresAt': now,
+      membershipExpiresAt: now,
+    });
+    const sub = member?.activeSubscription || {};
+    applyUserPatch(member.id, {
+      activeSubscription: { ...(sub || {}), status: 'expired', expiresAt: now },
+      membershipExpiresAt: now,
+    });
+  }}
+  onClearSub={async (member) => {
+    if (!member?.id) return;
+    await updateDoc(doc(db, 'users', member.id), { activeSubscription: null, membershipExpiresAt: null });
+    applyUserPatch(member.id, { activeSubscription: null, membershipExpiresAt: null });
+  }}
+  subsCatalog={subsCatalog}
+/>
+
           </CardShell>
         </div>
       </div>
@@ -491,32 +569,54 @@ export default function SessionsPage() {
         setSearch={setAssignSearch}
         onAssign={handleAssignToUser}
       />
+<RenewMembershipModal
+  open={renewOpen}
+  member={renewTarget}
+  subsCatalog={subsCatalog}
+  onClose={() => { setRenewOpen(false); setRenewTarget(null); }}
+  onSaved={(updatedMember) => {
+    if (updatedMember?.id) {
+      applyUserPatch(updatedMember.id, {
+        activeSubscription: updatedMember.activeSubscription || null,
+        membershipExpiresAt: updatedMember.membershipExpiresAt || null,
+      });
+    }
+  }}
+  onCheckIn={manualCheckIn}
+/>
 
-      <RenewMembershipModal
-        open={renewOpen}
-        member={renewTarget}
-        subsCatalog={subsCatalog}
-        onClose={() => { setRenewOpen(false); setRenewTarget(null); }}
-        onSaved={() => { setRenewOpen(false); setRenewTarget(null); }}
-      />
     </div>
   );
 }
 
 // —————————————————————————————————————————————
 // Sub-components
-function LastScansCard({ scans, onAssign }) {
+function LastScansCard({
+  scans,
+  usersMap,
+  userOverrides,
+  onAssign,
+  onRenew,
+  onExtend,
+  onEndNow,
+  onClearSub,
+}) {
   return (
     <div>
       <div className="flex items-center justify-between gap-2 mb-2">
         <h2 className="text-2xl font-bold">Last Scans</h2>
         {scans?.[0]?.status && (
-          <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
-            scans[0].status === 'matched' ? 'bg-emerald-100 text-emerald-700'
-            : scans[0].status === 'assigned' ? 'bg-blue-100 text-blue-700'
-            : scans[0].status === 'error' ? 'bg-rose-100 text-rose-700'
-            : 'bg-amber-100 text-amber-700'
-          }`}>
+          <span
+            className={`px-3 py-1 rounded-full text-xs font-semibold ${
+              scans[0].status === 'matched'
+                ? 'bg-emerald-100 text-emerald-700'
+                : scans[0].status === 'assigned'
+                ? 'bg-blue-100 text-blue-700'
+                : scans[0].status === 'error'
+                ? 'bg-rose-100 text-rose-700'
+                : 'bg-amber-100 text-amber-700'
+            }`}
+          >
             {String(scans[0].status).toUpperCase()}
           </span>
         )}
@@ -527,34 +627,116 @@ function LastScansCard({ scans, onAssign }) {
       ) : (
         <div className="space-y-3">
           {scans.map((scan) => {
-            const name = scan?.user?.fullName || scan?.user?.name || 'No match';
+    const member = currentMemberFromScan(scan, usersMap, userOverrides);
+
+            const name = member?.fullName || member?.name || 'No match';
             const rel = formatRelativeSmart(scan?.createdAt);
-            const unmatched = !scan?.user?.id && !scan?.matchedUserId;
+            const unmatched = !member?.id;
+            const status = getMembershipStatus(member);
+
+            const capsuleCls =
+              status.code === 'active'
+                ? 'bg-emerald-100 text-emerald-700'
+                : status.code === 'expired'
+                ? 'bg-rose-100 text-rose-700'
+                : 'bg-slate-200 text-slate-700';
+
+            const expiresLabel = status.expiresAt
+              ? status.expiresAt.toLocaleDateString([], {
+                  month: 'short',
+                  day: 'numeric',
+                  year: 'numeric',
+                })
+              : null;
 
             return (
-              <motion.div key={scan.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
-                className="rounded-[2rem] border border-slate-200 bg-white/70 p-5 shadow">
+              <motion.div
+                key={scan.id}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="rounded-[2rem] border border-slate-200 bg-white/70 p-5 shadow"
+              >
                 <div className="flex items-start gap-4">
                   <div className="w-12 h-12 rounded-2xl bg-slate-100 grid place-items-center overflow-hidden">
                     <BadgeCheck className="w-6 h-6 text-slate-500" />
                   </div>
+
                   <div className="flex-1 min-w-0">
-                    <div className="text-base font-bold text-black truncate">{name}</div>
+                    {/* Name + membership pill */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="text-base font-bold text-black truncate">
+                        {name}
+                      </div>
+                      {!unmatched && (
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full ${capsuleCls}`}
+                        >
+                          {status.label}
+                          {status.planName && (
+                            <span className="font-semibold">
+                              · {status.planName}
+                            </span>
+                          )}
+                          {status.expiresAt &&
+                            status.code !== 'inactive' && (
+                              <span className="opacity-70"> · {expiresLabel}</span>
+                            )}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Meta line */}
                     <div className="text-xs text-slate-600 mt-0.5">
                       Badge: <span className="font-mono">{scan?.badgeCode || '—'}</span>
                       <span className="mx-2">•</span>
                       Scanned <span className="font-medium">{rel}</span>
                     </div>
-                    {unmatched && (
+
+                    {/* Actions */}
+                    {unmatched ? (
                       <div className="mt-3">
-                        <button onClick={() => onAssign(scan)}
-                          className="rounded-full px-3 py-1.5 text-xs font-semibold bg-blue-500 text-white hover:bg-blue-600 transition">
+                        <button
+                          onClick={() => onAssign(scan)}
+                          className="rounded-full px-3 py-1.5 text-xs font-semibold bg-blue-500 text-white hover:bg-blue-600 transition"
+                        >
                           Assign User
                         </button>
-                        <Link href="/signup"
-                          className="ml-2 rounded-full px-3 py-1.5 text-xs font-semibold bg-purple-100 text-purple-700 hover:bg-purple-200 transition inline-flex items-center gap-2">
+                        <Link
+                          href="/signup"
+                          className="ml-2 rounded-full px-3 py-1.5 text-xs font-semibold bg-purple-100 text-purple-700 hover:bg-purple-200 transition inline-flex items-center gap-2"
+                        >
                           <UserPlus className="w-4 h-4" /> New Member
                         </Link>
+                      </div>
+                    ) : (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          className="rounded-full px-3 py-1.5 text-xs font-semibold bg-blue-500 text-white hover:bg-blue-600"
+                          onClick={() => onRenew(member)}
+                        >
+                          Renew
+                        </button>
+                        <button
+                          className="rounded-full px-3 py-1.5 text-xs font-semibold bg-slate-200 hover:bg-slate-300 disabled:opacity-40"
+                          onClick={() => onExtend(member)}
+                          disabled={status.code === 'inactive' || !member?.id}
+                        >
+                          +1 cycle
+                        </button>
+                        <button
+                          className="rounded-full px-3 py-1.5 text-xs font-semibold bg-rose-100 text-rose-700 hover:bg-rose-200 disabled:opacity-40"
+                          onClick={() => onEndNow(member)}
+                          disabled={status.code !== 'active' || !member?.id}
+                        >
+                          End now
+                        </button>
+                        <button
+                          className="rounded-full px-3 py-1.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 disabled:opacity-40"
+                          onClick={() => onClearSub(member)}
+                          disabled={!member?.id}
+                        >
+                          Clear subscription
+                        </button>
                       </div>
                     )}
                   </div>
@@ -567,6 +749,7 @@ function LastScansCard({ scans, onAssign }) {
     </div>
   );
 }
+
 function EmptyScans() {
   return (
     <div className="rounded-[2rem] border border-slate-200 bg-white/70 p-8 text-center shadow">
@@ -578,15 +761,28 @@ function EmptyScans() {
     </div>
   );
 }
-function currentMemberFor(session, usersMap) {
+function currentMemberFor(session, usersMap, userOverrides) {
   const embedded = session?.member || {};
   const live = embedded?.id ? usersMap[embedded.id] : null;
-  return live ? { ...embedded, ...live } : embedded;
+  const base = embedded?.id ? { ...embedded, ...(live || {}) } : embedded;
+  const over = embedded?.id ? userOverrides?.[embedded.id] : null;
+  return over ? { ...base, ...over } : base;
 }
+
+function currentMemberFromScan(scan, usersMap, userOverrides) {
+  const embedded = scan?.user || {};
+  const uid = embedded?.id || scan?.matchedUserId || null;
+  const live = uid ? usersMap[uid] : null;
+  const base = uid ? { id: uid, ...embedded, ...(live || {}) } : embedded;
+  const over = uid ? userOverrides?.[uid] : null;
+  return over ? { ...base, ...over } : base;
+}
+
 
 function SessionsPanel({
   filteredSessions,
   usersMap,
+  userOverrides,
   mode, setMode,
   employeeRole, setEmployeeRole, employeeRoleOptions,
   planFilter, setPlanFilter, planOptions,
@@ -599,6 +795,7 @@ function SessionsPanel({
   onRenew, onExtend, onEndNow, onClearSub,
   subsCatalog,
 }) {
+
   const [menuOpen, setMenuOpen] = useState(false);
 
   return (
@@ -696,18 +893,20 @@ function SessionsPanel({
         {viewMode === 'card' ? (
           <div className="grid gap-4 sm:grid-cols-1 md:grid-cols-2">
             {filteredSessions.map((s) => (
-              <SessionCard
-                key={s.id}
-                s={s}
-                usersMap={usersMap}
-                formatDuration={formatDuration}
-                readableType={readableType}
-                onOpen={() => setModalSession(s)}
-                onRenew={onRenew}
-                onExtend={onExtend}
-                onEndNow={onEndNow}
-                onClearSub={onClearSub}
-              />
+<SessionCard
+  key={s.id}
+  s={s}
+  usersMap={usersMap}
+  userOverrides={userOverrides}
+  formatDuration={formatDuration}
+  readableType={readableType}
+  onOpen={() => setModalSession(s)}
+  onRenew={onRenew}
+  onExtend={onExtend}
+  onEndNow={onEndNow}
+  onClearSub={onClearSub}
+/>
+
             ))}
           </div>
         ) : (
@@ -731,7 +930,8 @@ function SessionsPanel({
                   const end = toDateMaybe(s.endTime);
                   const duration = formatDuration(s.startTime, s.endTime);
 
-                  const member = currentMemberFor(s, usersMap);
+                  const member = currentMemberFor(s, usersMap, userOverrides);
+
                   const name = member?.fullName || member?.name || 'Unknown';
                   const m = getMembershipStatus(member);
 
@@ -822,11 +1022,11 @@ function QuickManageMenu({ member, status, onRenew, onExtend, onEndNow, onClearS
   );
 }
 
-function SessionCard({ s, usersMap, formatDuration, readableType, onOpen, onRenew, onExtend, onEndNow, onClearSub }) {
+function SessionCard({ s, usersMap, userOverrides, formatDuration, readableType, onOpen, onRenew, onExtend, onEndNow, onClearSub }) {
   const start = toDateMaybe(s.startTime);
   const end = toDateMaybe(s.endTime);
   const duration = formatDuration(s.startTime, s.endTime);
-  const member = currentMemberFor(s, usersMap);
+  const member = currentMemberFor(s, usersMap, userOverrides);
   const name = member?.fullName || member?.name || 'Unknown';
   const m = getMembershipStatus(member);
 
@@ -1043,13 +1243,19 @@ function ModalPortal({ children }) {
 
 // —————————————————————————————————————————————
 // Renew Membership Modal (premade subscriptions only)
-function RenewMembershipModal({ open, member, subsCatalog, onClose, onSaved }) {
+function RenewMembershipModal({ open, member, subsCatalog, onClose, onSaved, onCheckIn }) {
   const db = getFirestore(app);
   const [planId, setPlanId] = useState('');
+  const [externalRef, setExternalRef] = useState(''); // NEW
+  const [done, setDone] = useState(false);
+  const [saving, setSaving] = useState(false);
 
-  // Preselect: last/expired or currently active plan if any; else first in catalog.
   useEffect(() => {
     if (!open || !member) return;
+    setDone(false);
+    setSaving(false);
+    setExternalRef(''); // reset on open
+
     let pre = member?.activeSubscription?.planId || '';
     if (!pre && Array.isArray(member?.subscriptions) && member.subscriptions.length) {
       const last = [...member.subscriptions].reverse().find((s) => s?.planId);
@@ -1059,21 +1265,30 @@ function RenewMembershipModal({ open, member, subsCatalog, onClose, onSaved }) {
     setPlanId(pre || '');
   }, [open, member, subsCatalog]);
 
+  useEffect(() => {
+    if (!open) return;
+    if (!planId && subsCatalog?.length) setPlanId(subsCatalog[0].id);
+  }, [open, planId, subsCatalog]);
+
   if (!open || !member) return null;
+
   const plan = subsCatalog.find((p) => p.id === planId);
-  const canSave = !!plan;
+  const canSave = !!planId && subsCatalog.some((p) => p.id === planId);
 
   const savePaymentAndActivate = async () => {
+    if (!plan) return;
     try {
+      setSaving(true);
       const startedAt = new Date();
       const expiresAt = addCycle(startedAt, plan?.cycle || 'monthly');
 
-      // 1) record payment
+      // --- Create Payment with externalRef (fallback if empty)
+      const extRef = (externalRef || '').trim() || `sub:${plan.id}`;
       await addDoc(collection(db, 'payments'), {
         type: 'receipt',
         status: 'paid',
         method: 'card',
-        externalRef: `sub:${plan.id}`,
+        externalRef: extRef,
         lines: [{ itemId: plan.id, name: plan.name, qty: 1, unitPrice: Number(plan.price||0), total: Number(plan.price||0) }],
         total: Number(plan.price || 0),
         userId: member.id || member.uid || member.userId,
@@ -1082,7 +1297,7 @@ function RenewMembershipModal({ open, member, subsCatalog, onClose, onSaved }) {
         reason: 'membership_renewal',
       });
 
-      // 2) activate on user doc
+      // --- Activate subscription on the user
       const uid = member.id || member.uid || member.userId;
       if (!uid) throw new Error('No user id on member.');
       await updateDoc(doc(db, 'users', uid), {
@@ -1094,13 +1309,33 @@ function RenewMembershipModal({ open, member, subsCatalog, onClose, onSaved }) {
           expiresAt,
           status: 'active',
         },
-        membershipExpiresAt: expiresAt, // legacy field for compatibility
+        membershipExpiresAt: expiresAt,
       });
 
-      onSaved && onSaved();
+      // --- Return an updated member snapshot upward
+      const updated = {
+        ...member,
+        activeSubscription: {
+          ...(member.activeSubscription || {}),
+          planId: plan.id,
+          name: plan.name,
+          cycle: plan.cycle || 'monthly',
+          startedAt,
+          expiresAt,
+          status: 'active',
+        },
+        membershipExpiresAt: expiresAt,
+        // optional: you can surface last membership payment reference locally if you want
+        lastMembershipRef: extRef,
+      };
+
+      onSaved && onSaved(updated);
+      setDone(true);
     } catch (err) {
       console.error('Renew failed:', err);
       alert(`Renew failed: ${err?.message || err}`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -1108,65 +1343,108 @@ function RenewMembershipModal({ open, member, subsCatalog, onClose, onSaved }) {
     <ModalPortal>
       <AnimatePresence>
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[2147483647] flex items-center justify-center p-4 md:p-8 bg-white/40 backdrop-blur-lg supports-[backdrop-filter]:bg-white/30"
-          style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
+          className="fixed inset-0 z-[2147483647] flex items-center justify-center p-4 md:p-8 bg-black/10"
           onClick={onClose}
         >
           <motion.div initial={{ y: 32, opacity: 0, scale: 0.985 }} animate={{ y: 0, opacity: 1, scale: 1 }}
             exit={{ y: 16, opacity: 0, scale: 0.985 }} transition={{ duration: 0.22, ease: 'easeOut' }}
-            className="bg-white/90 backdrop-blur-md rounded-[2rem] shadow-2xl border border-slate-200 w-[min(92vw,36rem)] p-6"
+            className="bg-white rounded-[2rem] shadow-2xl border border-slate-200 w-[min(92vw,36rem)] p-6 text-slate-900"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-xl font-semibold">Renew Membership</h3>
-            <div className="text-sm text-slate-700 mt-1">
-              <div className="font-medium">{member.fullName || member.name}</div>
-              <div className="text-slate-500 text-xs">ID: <span className="font-mono">{member.id || '—'}</span></div>
-            </div>
+            {!done ? (
+              <>
+                <h3 className="text-xl font-bold text-slate-900">Renew Membership</h3>
+                <div className="text-sm text-slate-700 mt-1">
+                  <div className="font-medium">{member.fullName || member.name}</div>
+                  <div className="text-slate-500 text-xs">ID: <span className="font-mono">{member.id || '—'}</span></div>
+                </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
-              <div className="md:col-span-2">
-                <label className="text-xs font-semibold text-slate-600 mb-1 block">Subscription</label>
-                <select
-                  value={planId}
-                  onChange={(e) => setPlanId(e.target.value)}
-                  className="w-full h-10 px-3 rounded-xl bg-gray-100 hover:bg-gray-200 focus:bg-white outline-none"
-                >
-                  {subsCatalog.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} · ${(Number(p.price || 0)).toFixed(2)} · {p.cycle || 'monthly'}
-                    </option>
-                  ))}
-                </select>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+                  <div className="md:col-span-2">
+                    <label className="text-xs font-semibold text-slate-600 mb-1 block">Subscription</label>
+                    <select
+                      value={planId}
+                      onChange={(e) => setPlanId(e.target.value)}
+                      className="w-full h-10 px-3 rounded-xl bg-white border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900"
+                    >
+                      {subsCatalog.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} · ${(Number(p.price || 0)).toFixed(2)} · {p.cycle || 'monthly'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {plan && (
+                    <>
+                      <div>
+                        <div className="text-xs font-semibold text-slate-600 mb-1">Price</div>
+                        <div className="h-10 px-3 rounded-xl bg-gray-100 grid items-center">{`$${(Number(plan.price||0)).toFixed(2)}`}</div>
+                      </div>
+                      <div>
+                        <div className="text-xs font-semibold text-slate-600 mb-1">Cycle</div>
+                        <div className="h-10 px-3 rounded-xl bg-gray-100 grid items-center">{plan.cycle || 'monthly'}</div>
+                      </div>
+                    </>
+                  )}
+
+                  {/* NEW: External Reference # */}
+                  <div className="md:col-span-2">
+                    <div className="text-xs font-semibold text-slate-600 mb-1">External Reference #</div>
+                    <input
+                      value={externalRef}
+                      onChange={(e) => setExternalRef(e.target.value)}
+                      placeholder="You find this from MPOS touchnet after completion"
+                      className="w-full h-10 px-3 rounded-xl bg-white border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      If left empty, we’ll use <code>sub:{plan?.id || 'plan'}</code>.
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 mt-5">
+                  <button onClick={onClose} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">Cancel</button>
+                  <button
+                    disabled={!canSave || saving}
+                    onClick={savePaymentAndActivate}
+                    className={`px-4 py-2 rounded-xl text-white shadow ${(!canSave || saving) ? 'bg-blue-300' : 'bg-blue-500 hover:bg-blue-600'}`}
+                  >
+                    {saving ? 'Saving…' : 'Save & Renew'}
+                  </button>
+                </div>
+
+                <div className="text-[11px] text-slate-500 mt-3">
+                  Saves a Receipt in <code>payments</code> with your External Reference #.
+                </div>
+              </>
+            ) : (
+              <div className="text-center py-6">
+                <div className="mx-auto mb-3 w-14 h-14 rounded-full bg-emerald-100 grid place-items-center">
+                  <BadgeCheck className="w-7 h-7 text-emerald-600" />
+                </div>
+                <h3 className="text-xl font-bold">Membership Updated</h3>
+                <p className="text-slate-600 mt-1">
+                  {member.fullName || member.name} is now <span className="font-semibold">Active</span>.
+                </p>
+                <div className="flex justify-center gap-3 mt-5">
+                  <button onClick={onClose} className="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">
+                    Close
+                  </button>
+                  <button
+                    className="px-4 py-2 rounded-xl bg-blue-500 hover:bg-blue-600 text-white"
+                    onClick={async () => { await onCheckIn?.(member); onClose(); }}
+                  >
+                    Check In & Close
+                  </button>
+                </div>
               </div>
-
-              {plan && (
-                <>
-                  <div>
-                    <div className="text-xs font-semibold text-slate-600 mb-1">Price</div>
-                    <div className="h-10 px-3 rounded-xl bg-gray-100 grid items-center">{`$${(Number(plan.price||0)).toFixed(2)}`}</div>
-                  </div>
-                  <div>
-                    <div className="text-xs font-semibold text-slate-600 mb-1">Cycle</div>
-                    <div className="h-10 px-3 rounded-xl bg-gray-100 grid items-center">{plan.cycle || 'monthly'}</div>
-                  </div>
-                </>
-              )}
-            </div>
-
-            <div className="flex justify-end gap-2 mt-5">
-              <button onClick={onClose} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">Cancel</button>
-              <button disabled={!canSave} onClick={savePaymentAndActivate}
-                className={`px-4 py-2 rounded-xl text-white shadow ${!canSave ? 'bg-blue-300' : 'bg-blue-500 hover:bg-blue-600'}`}>
-                Save & Renew
-              </button>
-            </div>
-
-            <div className="text-[11px] text-slate-500 mt-3">
-              Uses only premade <code>subscriptions</code>. Payment amount and metadata are derived from the selected plan.
-            </div>
+            )}
           </motion.div>
         </motion.div>
       </AnimatePresence>
     </ModalPortal>
   );
 }
+
+
