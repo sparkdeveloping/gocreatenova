@@ -696,11 +696,17 @@ function SessionsPanel({
         {viewMode === 'card' ? (
           <div className="grid gap-4 sm:grid-cols-1 md:grid-cols-2">
             {filteredSessions.map((s) => (
-              <SessionCard key={s.id} s={s}
+              <SessionCard
+                key={s.id}
+                s={s}
                 usersMap={usersMap}
-                formatDuration={formatDuration} readableType={readableType}
+                formatDuration={formatDuration}
+                readableType={readableType}
                 onOpen={() => setModalSession(s)}
-                onRenew={onRenew} onExtend={onExtend} onEndNow={onEndNow} onClearSub={onClearSub}
+                onRenew={onRenew}
+                onExtend={onExtend}
+                onEndNow={onEndNow}
+                onClearSub={onClearSub}
               />
             ))}
           </div>
@@ -724,8 +730,10 @@ function SessionsPanel({
                   const start = toDateMaybe(s.startTime);
                   const end = toDateMaybe(s.endTime);
                   const duration = formatDuration(s.startTime, s.endTime);
-                  const name = memberFromSession(s)?.fullName || memberFromSession(s)?.name || 'Unknown';
-                  const m = getMembershipStatus(memberFromSession(s));
+
+                  const member = currentMemberFor(s, usersMap);
+                  const name = member?.fullName || member?.name || 'Unknown';
+                  const m = getMembershipStatus(member);
 
                   const capsuleCls =
                     m.code === 'active' ? 'bg-emerald-100 text-emerald-700'
@@ -755,12 +763,12 @@ function SessionsPanel({
                       </td>
                       <td className="px-2 py-1 text-right">
                         <QuickManageMenu
-                          member={memberFromSession(s)}
+                          member={member}
                           status={m}
-                          onRenew={() => onRenew(memberFromSession(s))}
-                          onExtend={() => onExtend(memberFromSession(s))}
-                          onEndNow={() => onEndNow(memberFromSession(s))}
-                          onClearSub={() => onClearSub(memberFromSession(s))}
+                          onRenew={() => onRenew(member)}
+                          onExtend={() => onExtend(member)}
+                          onEndNow={() => onEndNow(member)}
+                          onClearSub={() => onClearSub(member)}
                         />
                       </td>
                     </tr>
@@ -774,6 +782,7 @@ function SessionsPanel({
     </>
   );
 }
+
 
 function QuickManageMenu({ member, status, onRenew, onExtend, onEndNow, onClearSub }) {
   const [open, setOpen] = useState(false);
