@@ -29,43 +29,89 @@ const STEPS = ['Know You', 'Personal Info', 'Emergency', 'Vehicles', 'Done'];
 
 // Map membership type -> Role name to attach (case-insensitive match)
 const MEMBERSHIP_TO_ROLE = {
-  'Student': 'Student',
+  Student: 'Student',
   'WSU Staff': 'Staff',
-  'Educator': 'Educator',
+  Educator: 'Educator',
   'Senior Citizen': 'Senior',
-  'Veteran': 'Veteran',
-  'None': 'Member',
+  Veteran: 'Veteran',
+  None: 'Member',
 };
 
-// Safer Tailwind classes for Step 1 tiles
+// Countries + Regions
+const COUNTRIES = [
+  'USA',
+  'Canada',
+  'Mexico',
+  'United Kingdom',
+  'Australia',
+  'India',
+  'Nigeria',
+  'South Africa',
+  'Philippines',
+  'China',
+  'Japan',
+  'South Korea',
+  'Germany',
+  'France',
+  'Spain',
+  'Italy',
+  'Brazil',
+  'Argentina',
+  'Colombia',
+  'Other',
+];
+
+const US_STATES = [
+  'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA',
+  'HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
+  'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+  'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
+  'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY',
+];
+
+const CA_PROVINCES = [
+  'AB','BC','MB','NB','NL','NS','NT','NU','ON','PE','QC','SK','YT',
+];
+
+function regionOptionsForCountry(country) {
+  if (country === 'USA') return US_STATES;
+  if (country === 'Canada') return CA_PROVINCES;
+  return null;
+}
+
 // Vibrant tile palette for Step 1
 const TILE_PALETTE = {
   yellow: {
-    selected: 'bg-gradient-to-br from-amber-50 to-yellow-100 border-amber-400 ring-amber-300 text-amber-800 shadow-amber-200/60',
+    selected:
+      'bg-gradient-to-br from-amber-50 to-yellow-100 border-amber-400 ring-amber-300 text-amber-800 shadow-amber-200/60',
     dot: 'bg-amber-500',
   },
   indigo: {
-    selected: 'bg-gradient-to-br from-indigo-50 to-indigo-100 border-indigo-400 ring-indigo-300 text-indigo-800 shadow-indigo-200/60',
+    selected:
+      'bg-gradient-to-br from-indigo-50 to-indigo-100 border-indigo-400 ring-indigo-300 text-indigo-800 shadow-indigo-200/60',
     dot: 'bg-indigo-500',
   },
   green: {
-    selected: 'bg-gradient-to-br from-emerald-50 to-emerald-100 border-emerald-400 ring-emerald-300 text-emerald-800 shadow-emerald-200/60',
+    selected:
+      'bg-gradient-to-br from-emerald-50 to-emerald-100 border-emerald-400 ring-emerald-300 text-emerald-800 shadow-emerald-200/60',
     dot: 'bg-emerald-500',
   },
   pink: {
-    selected: 'bg-gradient-to-br from-pink-50 to-rose-100 border-pink-400 ring-pink-300 text-pink-800 shadow-pink-200/60',
+    selected:
+      'bg-gradient-to-br from-pink-50 to-rose-100 border-pink-400 ring-pink-300 text-pink-800 shadow-pink-200/60',
     dot: 'bg-pink-500',
   },
   red: {
-    selected: 'bg-gradient-to-br from-red-50 to-rose-100 border-red-400 ring-red-300 text-red-800 shadow-red-200/60',
+    selected:
+      'bg-gradient-to-br from-red-50 to-rose-100 border-red-400 ring-red-300 text-red-800 shadow-red-200/60',
     dot: 'bg-red-500',
   },
   slate: {
-    selected: 'bg-gradient-to-br from-slate-50 to-slate-100 border-slate-400 ring-slate-300 text-slate-800 shadow-slate-200/60',
+    selected:
+      'bg-gradient-to-br from-slate-50 to-slate-100 border-slate-400 ring-slate-300 text-slate-800 shadow-slate-200/60',
     dot: 'bg-slate-500',
   },
 };
-
 
 // ------------------------------------------------------------
 
@@ -75,7 +121,7 @@ export default function SignupPage() {
 
   const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [seconds, setSeconds] = useState(30);
+  const [seconds, setSeconds] = useState(7);
 
   const [wizardData, setWizardData] = useState({
     membershipType: '',
@@ -105,21 +151,25 @@ export default function SignupPage() {
   const updateWizard = (patch) => setWizardData((prev) => ({ ...prev, ...patch }));
 
   const isValidEmergency = useMemo(() => {
-    return wizardData.emergency.every((c) =>
-      c.name.trim() !== '' &&
-      c.phone.trim() !== '' &&
-      c.email.trim() !== '' &&
-      c.street.trim() !== '' &&
-      c.country.trim() !== '' &&
-      c.city.trim() !== '' &&
-      c.zip.trim() !== '' &&
-      (c.country !== 'USA' || c.state.trim() !== '')
-    );
+    return wizardData.emergency.every((c) => {
+      const requiresRegion = c.country === 'USA' || c.country === 'Canada';
+      return (
+        c.name.trim() !== '' &&
+        c.phone.trim() !== '' &&
+        c.email.trim() !== '' &&
+        c.street.trim() !== '' &&
+        c.country.trim() !== '' &&
+        c.city.trim() !== '' &&
+        c.zip.trim() !== '' &&
+        (!requiresRegion || c.state.trim() !== '')
+      );
+    });
   }, [wizardData.emergency]);
 
   // success countdown
   useEffect(() => {
     if (step === STEPS.length - 1) {
+      setSeconds(7);
       const interval = setInterval(() => {
         setSeconds((s) => {
           if (s <= 1) {
@@ -138,17 +188,12 @@ export default function SignupPage() {
     const snap = await getDocs(collection(db, 'roles'));
     const roles = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-    const byName = new Map(
-      roles.map((r) => [String(r.name || '').toLowerCase(), r])
-    );
-
+    const byName = new Map(roles.map((r) => [String(r.name || '').toLowerCase(), r]));
     const defaultRole = roles.find((r) => !!r.isDefault) || null;
 
     const mappedName = MEMBERSHIP_TO_ROLE[membershipType] || 'Member';
     const mappedRole =
-      byName.get(String(mappedName).toLowerCase()) ||
-      byName.get('member') ||
-      null;
+      byName.get(String(mappedName).toLowerCase()) || byName.get('member') || null;
 
     const summaries = [];
     const aliases = [];
@@ -164,9 +209,7 @@ export default function SignupPage() {
     }
 
     // Fallback if nothing found: create a soft alias record (keeps legacy filters working)
-    if (summaries.length === 0) {
-      aliases.push('member');
-    }
+    if (summaries.length === 0) aliases.push('member');
 
     // Dedup aliases
     const roleAliases = Array.from(new Set(aliases.filter(Boolean)));
@@ -179,9 +222,7 @@ export default function SignupPage() {
       setLoading(true);
 
       // Resolve roles
-      const { assigned, roleAliases } = await resolveAssignedRoles(
-        wizardData.membershipType
-      );
+      const { assigned, roleAliases } = await resolveAssignedRoles(wizardData.membershipType);
 
       // Build user doc
       const docData = {
@@ -195,8 +236,8 @@ export default function SignupPage() {
         membershipType: wizardData.membershipType || 'None',
 
         // Keep data models rich + compatible:
-        roles: assigned,             // [{id,name}] -> used by Roles/Permissions layer
-        roleAliases,                 // ['member','student',...] -> keeps older string-based filters working
+        roles: assigned, // [{id,name}] -> used by Roles/Permissions layer
+        roleAliases, // ['member','student',...] -> keeps older string-based filters working
 
         emergencyContacts: wizardData.emergency,
         vehicles: wizardData.addVehicles ? wizardData.vehicles : [],
@@ -225,7 +266,10 @@ export default function SignupPage() {
 
       {/* corner chips */}
       <CornerCard position="top-left" content="Wichita, KS — 75°F ☀️" />
-      <CornerCard position="top-right" content={`${dayjs().format('dddd, MMM D')} — ${dayjs().format('h:mm A')}`} />
+      <CornerCard
+        position="top-right"
+        content={`${dayjs().format('dddd, MMM D')} — ${dayjs().format('h:mm A')}`}
+      />
       <CornerCard position="bottom-left" content="Gallery" />
       <CornerCard position="bottom-right" content="Map" />
 
@@ -237,6 +281,18 @@ export default function SignupPage() {
           className="bg-white/80 backdrop-blur-lg border border-slate-200 rounded-[2rem] shadow-xl w-full max-w-xl p-6 space-y-4"
         >
           <StepIndicator step={step} />
+
+          {/* Global back-to-home control */}
+          <div className="flex justify-between items-center">
+            <button
+              type="button"
+              onClick={() => router.push('/')}
+              className="text-sm text-slate-600 hover:text-slate-900 hover:underline"
+            >
+              Back to Home
+            </button>
+            <div className="text-xs text-slate-500">{STEPS[step]}</div>
+          </div>
 
           <AnimatePresence mode="wait">
             {step === 0 && (
@@ -306,7 +362,9 @@ function CornerCard({ position, content }) {
     'bottom-right': 'bottom-4 right-4',
   };
   return (
-    <div className={`absolute ${pos[position]} bg-white/80 backdrop-blur-md rounded-xl px-3 py-2 text-sm border border-slate-300 shadow-sm cursor-pointer text-slate-700 hover:scale-105 transition`}>
+    <div
+      className={`absolute ${pos[position]} bg-white/80 backdrop-blur-md rounded-xl px-3 py-2 text-sm border border-slate-300 shadow-sm cursor-pointer text-slate-700 hover:scale-105 transition`}
+    >
       {content}
     </div>
   );
@@ -316,7 +374,8 @@ function StepIndicator({ step }) {
   return (
     <div className="flex space-x-2 justify-center mb-2">
       {STEPS.map((_, idx) => {
-        const color = idx   < step ? 'bg-blue-500' : idx === step ? 'bg-blue-300' : 'bg-gray-300';
+        const color =
+          idx < step ? 'bg-blue-500' : idx === step ? 'bg-blue-300' : 'bg-gray-300';
         return <div key={idx} className={`${color} flex-1 h-2 rounded-full`} />;
       })}
     </div>
@@ -338,7 +397,9 @@ function Step1({ data, update, onNext }) {
 
   return (
     <>
-      <h2 className="text-xl font-semibold text-slate-800 mb-4">Getting to know you better</h2>
+      <h2 className="text-xl font-semibold text-slate-800 mb-4">
+        Getting to know you better
+      </h2>
 
       <div className="grid grid-cols-2 gap-3">
         {types.map((t) => {
@@ -350,8 +411,7 @@ function Step1({ data, update, onNext }) {
             'bg-white/80 border-slate-300 text-slate-700 hover:bg-white shadow-sm hover:shadow ' +
             'focus:outline-none';
 
-          const sel =
-            ` ring-2 ${palette.selected} shadow-lg `;
+          const sel = ` ring-2 ${palette.selected} shadow-lg `;
 
           return (
             <button
@@ -360,12 +420,12 @@ function Step1({ data, update, onNext }) {
               onClick={() => update({ membershipType: t.label })}
               className={base + (selected ? sel : '')}
             >
-              {/* status dot when selected */}
               {selected && (
-                <span className={`absolute top-2 right-2 w-2.5 h-2.5 rounded-full ${palette.dot}`} />
+                <span
+                  className={`absolute top-2 right-2 w-2.5 h-2.5 rounded-full ${palette.dot}`}
+                />
               )}
 
-              {/* icon + label */}
               <t.icon
                 size={24}
                 className={
@@ -396,19 +456,42 @@ function Step1({ data, update, onNext }) {
   );
 }
 
-
 // Step 2
 function Step2({ data, update, onNext, onBack }) {
   return (
     <>
       <h2 className="text-xl font-semibold text-slate-800 mb-4">Personal Information</h2>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <InputField placeholder="First Name" value={data.firstName} setValue={(v) => update({ firstName: v })} />
-        <InputField placeholder="Last Name" value={data.lastName} setValue={(v) => update({ lastName: v })} />
-        <InputField placeholder="Suffix (optional)" value={data.suffix} setValue={(v) => update({ suffix: v })} />
-        <InputField placeholder="Email" value={data.email} setValue={(v) => update({ email: v })} />
-        <InputField placeholder="Phone" value={data.phone} setValue={(v) => update({ phone: v })} />
-        <InputField placeholder="Address" value={data.address} setValue={(v) => update({ address: v })} />
+        <InputField
+          placeholder="First Name"
+          value={data.firstName}
+          setValue={(v) => update({ firstName: v })}
+        />
+        <InputField
+          placeholder="Last Name"
+          value={data.lastName}
+          setValue={(v) => update({ lastName: v })}
+        />
+        <InputField
+          placeholder="Suffix (optional)"
+          value={data.suffix}
+          setValue={(v) => update({ suffix: v })}
+        />
+        <InputField
+          placeholder="Email"
+          value={data.email}
+          setValue={(v) => update({ email: v })}
+        />
+        <InputField
+          placeholder="Phone"
+          value={data.phone}
+          setValue={(v) => update({ phone: v })}
+        />
+        <InputField
+          placeholder="Address"
+          value={data.address}
+          setValue={(v) => update({ address: v })}
+        />
         <div className="relative md:col-span-2">
           <input
             type="date"
@@ -419,8 +502,15 @@ function Step2({ data, update, onNext, onBack }) {
         </div>
       </div>
       <div className="mt-6 flex justify-between">
-        <button onClick={onBack} className="text-slate-500 hover:underline">Back</button>
-        <button onClick={onNext} className="bg-blue-500 hover:bg-blue-600 hover:scale-105 text-white rounded-xl py-2 px-4 transition">Next</button>
+        <button onClick={onBack} className="text-slate-500 hover:underline">
+          Back
+        </button>
+        <button
+          onClick={onNext}
+          className="bg-blue-500 hover:bg-blue-600 hover:scale-105 text-white rounded-xl py-2 px-4 transition"
+        >
+          Next
+        </button>
       </div>
     </>
   );
@@ -439,34 +529,100 @@ function Step3({ data, update, onNext, onBack }) {
   const remove = (i) => update({ emergency: data.emergency.filter((_, idx) => idx !== i) });
 
   const edit = (i, key, val) =>
-    update({ emergency: data.emergency.map((c, idx) => (idx === i ? { ...c, [key]: val } : c)) });
+    update({
+      emergency: data.emergency.map((c, idx) =>
+        idx === i ? { ...c, [key]: val } : c
+      ),
+    });
 
   return (
     <>
       <h2 className="text-xl font-semibold text-slate-800 mb-4">Emergency Contacts</h2>
-      {data.emergency.map((c, idx) => (
-        <div key={idx} className="border border-slate-300 rounded-xl p-3 mb-3 space-y-2 bg-slate-50/80">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            <InputField placeholder="Name" value={c.name} setValue={(v) => edit(idx, 'name', v)} />
-            <InputField placeholder="Phone" value={c.phone} setValue={(v) => edit(idx, 'phone', v)} />
-            <InputField placeholder="Email" value={c.email} setValue={(v) => edit(idx, 'email', v)} />
-            <InputField placeholder="Street" value={c.street} setValue={(v) => edit(idx, 'street', v)} />
-            <InputField placeholder="Country" value={c.country} setValue={(v) => edit(idx, 'country', v)} />
-            {c.country === 'USA' && (
-              <InputField placeholder="State" value={c.state} setValue={(v) => edit(idx, 'state', v)} />
+
+      {data.emergency.map((c, idx) => {
+        const regions = regionOptionsForCountry(c.country);
+        const needsRegion = !!regions;
+
+        return (
+          <div
+            key={idx}
+            className="border border-slate-300 rounded-xl p-3 mb-3 space-y-2 bg-slate-50/80"
+          >
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <InputField placeholder="Name" value={c.name} setValue={(v) => edit(idx, 'name', v)} />
+              <InputField placeholder="Phone" value={c.phone} setValue={(v) => edit(idx, 'phone', v)} />
+              <InputField placeholder="Email" value={c.email} setValue={(v) => edit(idx, 'email', v)} />
+              <InputField placeholder="Street" value={c.street} setValue={(v) => edit(idx, 'street', v)} />
+
+              {/* Country dropdown */}
+              <select
+                value={c.country}
+                onChange={(e) => {
+                  const nextCountry = e.target.value;
+                  const nextRegions = regionOptionsForCountry(nextCountry);
+                  // Reset state if no longer applicable
+                  edit(idx, 'country', nextCountry);
+                  if (!nextRegions) edit(idx, 'state', '');
+                }}
+                className="w-full rounded-xl bg-slate-50/80 border border-slate-300 text-slate-700 px-3 py-3 text-sm focus:outline-none backdrop-blur-md shadow-sm"
+              >
+                <option value="" disabled>
+                  Country
+                </option>
+                {COUNTRIES.map((cty) => (
+                  <option key={cty} value={cty}>
+                    {cty}
+                  </option>
+                ))}
+              </select>
+
+              {/* State/Province dropdown if applicable */}
+              {needsRegion && (
+                <select
+                  value={c.state}
+                  onChange={(e) => edit(idx, 'state', e.target.value)}
+                  className="w-full rounded-xl bg-slate-50/80 border border-slate-300 text-slate-700 px-3 py-3 text-sm focus:outline-none backdrop-blur-md shadow-sm"
+                >
+                  <option value="" disabled>
+                    {c.country === 'Canada' ? 'Province / Territory' : 'State'}
+                  </option>
+                  {regions.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {/* City typable */}
+              <InputField placeholder="City" value={c.city} setValue={(v) => edit(idx, 'city', v)} />
+
+              <InputField placeholder="Zip / Postal" value={c.zip} setValue={(v) => edit(idx, 'zip', v)} />
+            </div>
+
+            {data.emergency.length > 1 && (
+              <button onClick={() => remove(idx)} className="text-sm text-red-500 hover:underline">
+                Remove
+              </button>
             )}
-            <InputField placeholder="City" value={c.city} setValue={(v) => edit(idx, 'city', v)} />
-            <InputField placeholder="Zip / Postal" value={c.zip} setValue={(v) => edit(idx, 'zip', v)} />
           </div>
-          {data.emergency.length > 1 && (
-            <button onClick={() => remove(idx)} className="text-sm text-red-500 hover:underline">Remove</button>
-          )}
-        </div>
-      ))}
-      <button onClick={add} className="text-blue-500 hover:underline">Add Another</button>
+        );
+      })}
+
+      <button onClick={add} className="text-blue-500 hover:underline">
+        Add Another
+      </button>
+
       <div className="mt-4 flex justify-between">
-        <button onClick={onBack} className="text-slate-500 hover:underline">Back</button>
-        <button onClick={onNext} className="bg-blue-500 hover:bg-blue-600 hover:scale-105 text-white rounded-xl py-2 px-4 transition">Next</button>
+        <button onClick={onBack} className="text-slate-500 hover:underline">
+          Back
+        </button>
+        <button
+          onClick={onNext}
+          className="bg-blue-500 hover:bg-blue-600 hover:scale-105 text-white rounded-xl py-2 px-4 transition"
+        >
+          Next
+        </button>
       </div>
     </>
   );
@@ -478,13 +634,16 @@ function Step4({ data, update, onNext, onBack, loading }) {
     update({
       vehicles: [...data.vehicles, { make: '', model: '', year: '', color: '', plate: '' }],
     });
+
   const remove = (i) => update({ vehicles: data.vehicles.filter((_, idx) => idx !== i) });
+
   const edit = (i, k, v) =>
     update({ vehicles: data.vehicles.map((obj, idx) => (idx === i ? { ...obj, [k]: v } : obj)) });
 
   return (
     <>
       <h2 className="text-xl font-semibold text-slate-800 mb-4">Vehicles</h2>
+
       {!data.addVehicles ? (
         <>
           <p className="text-slate-600">Would you like to add vehicle information?</p>
@@ -521,9 +680,15 @@ function Step4({ data, update, onNext, onBack, loading }) {
               </button>
             </div>
           ))}
-          <button onClick={add} className="text-blue-500 hover:underline">Add Another Vehicle</button>
+
+          <button onClick={add} className="text-blue-500 hover:underline">
+            Add Another Vehicle
+          </button>
+
           <div className="mt-4 flex justify-between">
-            <button onClick={onBack} className="text-slate-500 hover:underline">Back</button>
+            <button onClick={onBack} className="text-slate-500 hover:underline">
+              Back
+            </button>
             <button
               onClick={onNext}
               disabled={loading}
@@ -543,7 +708,7 @@ function Step5({ seconds }) {
   return (
     <div className="text-center space-y-4">
       <h2 className="text-2xl font-bold text-slate-800">Successfully created your membership!</h2>
-      <p className="text-slate-600">Please collect your badge at the front desk.</p>
+      <p className="text-slate-600">See the front desk to get your badge printed.</p>
       <p className="text-sm text-slate-500">Returning to home in {seconds} seconds…</p>
     </div>
   );
