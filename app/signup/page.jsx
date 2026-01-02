@@ -245,6 +245,8 @@ export default function SignupPage() {
       };
 
       await addDoc(collection(db, 'users'), docData);
+      localStorage.setItem('nova-users-dirty', String(Date.now()));
+
       setStep(4);
     } catch (err) {
       console.error(err);

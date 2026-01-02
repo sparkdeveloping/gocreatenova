@@ -18,7 +18,7 @@ import {
   MapPin,
   Sparkles,
   ShieldAlert,
-  Clock8
+  Clock8,
 } from 'lucide-react';
 import {
   getFirestore,
@@ -26,11 +26,11 @@ import {
   query,
   where,
   getDocs,
-  limit as fsLimit,
   addDoc,
   updateDoc,
   doc,
   serverTimestamp,
+  getDocFromServer,
 } from 'firebase/firestore';
 
 import { app } from './lib/firebase';
@@ -99,7 +99,15 @@ function getMembershipStatus(user) {
       hadAny,
     };
   }
-  return { label: 'Inactive', code: 'inactive', expiresAt: null, planName: null, planId: null, cycle: null, hadAny: false };
+  return {
+    label: 'Inactive',
+    code: 'inactive',
+    expiresAt: null,
+    planName: null,
+    planId: null,
+    cycle: null,
+    hadAny: false,
+  };
 }
 function formatCountdown(target) {
   const t = toDateSafe(target);
@@ -114,6 +122,16 @@ function formatCountdown(target) {
   if (days > 0) return `${days} day${days === 1 ? '' : 's'} ${hours}h ${mins}m`;
   if (hours > 0) return `${hours}h ${mins}m`;
   return `${mins}m`;
+}
+
+// Always fetch the freshest user from the server before membership gating.
+async function getFreshUser(db, userLike) {
+  if (!userLike?.id) return userLike;
+  try {
+    const snap = await getDocFromServer(doc(db, 'users', userLike.id));
+    if (snap.exists()) return { id: snap.id, ...snap.data() };
+  } catch (_) {}
+  return userLike;
 }
 
 // —————————————————————————————————————————————
@@ -191,7 +209,23 @@ export default function NovaPublicHome() {
     }, 0);
   }
 
-  useEffect(() => { refreshRoles(false); }, [refreshRoles]);
+  useEffect(() => {
+    refreshRoles(false);
+  }, [refreshRoles]);
+
+  // If signup just finished, invalidate local pools quickly so the next scan is always fresh.
+  useEffect(() => {
+    // You can set this flag in signup page right before redirect:
+    // localStorage.setItem('nova-users-dirty', String(Date.now()));
+    const dirty = localStorage.getItem('nova-users-dirty');
+    if (dirty) {
+      // Clear to avoid repeated work
+      localStorage.removeItem('nova-users-dirty');
+      // Force-load a fresh users list in the background (used for wizard search)
+      ensureUsersLoaded(true).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const updateGreeting = () => {
@@ -234,7 +268,8 @@ export default function NovaPublicHome() {
     if (!buf || showRelinkModal || showWizard || headsUp || blockInfo) return;
     const elapsed = Date.now() - lastKeyAt;
     if (buf.length >= 5 && elapsed > 140) {
-      requestCommit(buf.slice(0, 5)); return;
+      requestCommit(buf.slice(0, 5));
+      return;
     }
     const t = setTimeout(() => {
       const gap = Date.now() - lastKeyAt;
@@ -278,106 +313,107 @@ export default function NovaPublicHome() {
   };
 
   const handleScan = async (code) => {
-  try {
-    const badgeCode = clamp5(code);
-    if (badgeCode.length !== 5) return;
+    try {
+      const badgeCode = clamp5(code);
+      if (badgeCode.length !== 5) return;
 
-    // prefer context users; fall back to localUsers
-    const pool = (Array.isArray(allUsers) && allUsers.length > 0) ? allUsers : localUsers;
+      // prefer context users; fall back to localUsers
+      const pool = Array.isArray(allUsers) && allUsers.length > 0 ? allUsers : localUsers;
 
-    // ZERO-READ fast path via badge index + pool; at worst 1 read fallback
-    const hit = await findUserByBadge(badgeCode, {
-      userPool: pool,
-      allowFirestoreFallback: true,
-      allowDirectWhereQuery: false, // keep it at max 1 read
-    });
-
-    if (!hit) {
-      const ref = await addDoc(collection(db, 'scans'), {
-        badgeCode,
-        matchedUserId: null,
-        user: null,
-        status: 'not_found',
-        createdAt: serverTimestamp(),
-        kioskId,
+      // Fast path via badge index + pool; allow server fallback if pool/index misses.
+      const hit = await findUserByBadge(badgeCode, {
+        userPool: pool,
+        allowFirestoreFallback: true,
+        allowDirectWhereQuery: true, // IMPORTANT: discover new badge links without page reload
       });
-      setPendingScanId(ref.id);
-      setPendingBadgeCode(badgeCode);
-      openRelinkModal();
-      return;
-    }
 
-    const userDoc = hit; // already { id, ...data }
-    const matchedUserMinimal = {
-      id: userDoc.id,
-      name: userDoc.fullName || userDoc.name || '',
-      photoURL: userDoc.photoURL || null,
-    };
+      if (!hit) {
+        const ref = await addDoc(collection(db, 'scans'), {
+          badgeCode,
+          matchedUserId: null,
+          user: null,
+          status: 'not_found',
+          createdAt: serverTimestamp(),
+          kioskId,
+        });
+        setPendingScanId(ref.id);
+        setPendingBadgeCode(badgeCode);
+        openRelinkModal();
+        return;
+      }
 
-    // membership evaluation
-    const status = getMembershipStatus(userDoc);
+      // CRITICAL: refresh user from server so membership updates are recognized immediately
+      const userDoc = await getFreshUser(db, hit);
 
-    if (status.code === 'active') {
+      const matchedUserMinimal = {
+        id: userDoc.id,
+        name: userDoc.fullName || userDoc.name || '',
+        photoURL: userDoc.photoURL || null,
+      };
+
+      // membership evaluation (fresh)
+      const status = getMembershipStatus(userDoc);
+
+      if (status.code === 'active') {
+        const scanRef = await addDoc(collection(db, 'scans'), {
+          badgeCode,
+          matchedUserId: userDoc.id,
+          user: matchedUserMinimal,
+          status: 'matched',
+          createdAt: serverTimestamp(),
+          kioskId,
+        });
+
+        const daysLeft = status.expiresAt
+          ? Math.ceil((toDateSafe(status.expiresAt) - new Date()) / 86400000)
+          : 9999;
+
+        if (daysLeft <= 7) {
+          setHeadsUp({ user: { id: userDoc.id, ...userDoc }, status, scanId: scanRef.id });
+          setPendingBadgeCode(badgeCode);
+          setPendingScanId(scanRef.id);
+          return;
+        }
+
+        proceedToCheckin(userDoc.id, userDoc);
+        return;
+      }
+
+      // expired or inactive
+      const blockStatus =
+        status.code === 'expired' ? 'blocked_membership_expired' : 'blocked_membership_inactive';
+
       const scanRef = await addDoc(collection(db, 'scans'), {
         badgeCode,
         matchedUserId: userDoc.id,
         user: matchedUserMinimal,
-        status: 'matched',
+        status: blockStatus,
         createdAt: serverTimestamp(),
         kioskId,
       });
 
-      const daysLeft = status.expiresAt
-        ? Math.ceil((toDateSafe(status.expiresAt) - new Date()) / 86400000)
-        : 9999;
-
-      if (daysLeft <= 7) {
-        setHeadsUp({ user: { id: userDoc.id, ...userDoc }, status, scanId: scanRef.id });
-        setPendingBadgeCode(badgeCode);
-        setPendingScanId(scanRef.id);
-        return;
-      }
-
-      proceedToCheckin(userDoc.id, userDoc);
+      setBlockInfo({ user: { id: userDoc.id, ...userDoc }, status, scanId: scanRef.id });
+      setPendingScanId(scanRef.id);
+      setPendingBadgeCode(badgeCode);
       return;
+    } catch (err) {
+      console.error('Scan lookup error:', err);
+      try {
+        const ref = await addDoc(collection(db, 'scans'), {
+          badgeCode: clamp5(code) || null,
+          matchedUserId: null,
+          user: null,
+          status: 'error',
+          errorMessage: String(err?.message || err),
+          createdAt: serverTimestamp(),
+          kioskId,
+        });
+        setPendingScanId(ref.id);
+        setPendingBadgeCode(clamp5(code));
+      } catch (_) {}
+      openRelinkModal();
     }
-
-    // expired or inactive
-    const blockStatus =
-      status.code === 'expired' ? 'blocked_membership_expired' : 'blocked_membership_inactive';
-
-    const scanRef = await addDoc(collection(db, 'scans'), {
-      badgeCode,
-      matchedUserId: userDoc.id,
-      user: matchedUserMinimal,
-      status: blockStatus,
-      createdAt: serverTimestamp(),
-      kioskId,
-    });
-
-    setBlockInfo({ user: { id: userDoc.id, ...userDoc }, status, scanId: scanRef.id });
-    setPendingScanId(scanRef.id);
-    setPendingBadgeCode(badgeCode);
-    return;
-  } catch (err) {
-    console.error('Scan lookup error:', err);
-    try {
-      const ref = await addDoc(collection(db, 'scans'), {
-        badgeCode: clamp5(code) || null,
-        matchedUserId: null,
-        user: null,
-        status: 'error',
-        errorMessage: String(err?.message || err),
-        createdAt: serverTimestamp(),
-        kioskId,
-      });
-      setPendingScanId(ref.id);
-      setPendingBadgeCode(clamp5(code));
-    } catch (_) {}
-    openRelinkModal();
-  }
-};
-
+  };
 
   // —————————————————————————————————————————————
   // RELINK / WIZARD HELPERS
@@ -399,7 +435,10 @@ export default function NovaPublicHome() {
 
   useEffect(() => {
     if (!showRelinkModal || showWizard) return;
-    if (dismissIn <= 0) { closeRelinkAndWizard(); return; }
+    if (dismissIn <= 0) {
+      closeRelinkAndWizard();
+      return;
+    }
     const id = setTimeout(() => setDismissIn((s) => s - 1), 1000);
     return () => clearTimeout(id);
   }, [showRelinkModal, showWizard, dismissIn]);
@@ -410,14 +449,18 @@ export default function NovaPublicHome() {
     try {
       if (pendingScanId) {
         await updateDoc(doc(db, 'scans', pendingScanId), {
-          flowChoice: 'help', flowChosenAt: serverTimestamp(),
+          flowChoice: 'help',
+          flowChosenAt: serverTimestamp(),
           status: blockInfo ? 'referred_for_membership_help' : 'relink_help_requested',
         });
       }
       await addDoc(collection(db, 'assistanceRequests'), {
         type: blockInfo ? 'membership_help' : 'badge_relink',
-        kioskId, badgeCode: pendingBadgeCode || null,
-        scanId: pendingScanId || null, status: 'open', createdAt: serverTimestamp(),
+        kioskId,
+        badgeCode: pendingBadgeCode || null,
+        scanId: pendingScanId || null,
+        status: 'open',
+        createdAt: serverTimestamp(),
       });
       setHelpNotified(true);
     } catch (e) {
@@ -428,45 +471,51 @@ export default function NovaPublicHome() {
     }
   };
 
-const ensureUsersLoaded = async () => {
-  if (Array.isArray(allUsers) && allUsers.length > 0) return;
-  if (localUsers.length > 0) return;
-  try {
-    const snap = await getDocs(collection(db, 'users'));
-    const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    setLocalUsers(list);
-  } catch (e) {
-    console.warn('Fallback user fetch failed', e);
-  }
-};
-
+  const ensureUsersLoaded = async (force = false) => {
+    if (!force) {
+      if (Array.isArray(allUsers) && allUsers.length > 0) return;
+      if (localUsers.length > 0) return;
+    }
+    try {
+      const snap = await getDocs(collection(db, 'users'));
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setLocalUsers(list);
+    } catch (e) {
+      console.warn('Fallback user fetch failed', e);
+    }
+  };
 
   const openWizard = async () => {
     try {
       if (pendingScanId) {
         await updateDoc(doc(db, 'scans', pendingScanId), {
-          flowChoice: 'self_serve', flowChosenAt: serverTimestamp(), status: 'relink_self_selected',
+          flowChoice: 'self_serve',
+          flowChosenAt: serverTimestamp(),
+          status: 'relink_self_selected',
         });
       }
-    } catch (e) { console.warn('Could not mark flow choice on scan:', e); }
+    } catch (e) {
+      console.warn('Could not mark flow choice on scan:', e);
+    }
     await ensureUsersLoaded();
     setShowWizard(true);
   };
 
-  const sourceUsers = (allUsers && allUsers.length > 0) ? allUsers : localUsers;
+  const sourceUsers = allUsers && allUsers.length > 0 ? allUsers : localUsers;
 
   const allUsersIndexed = useMemo(
-    () => (sourceUsers || []).map((u) => ({
-      id: u.id,
-      name: u.fullName || u.name || '',
-      nameNorm: normalize(u.fullName || u.name || ''),
-      email: u.email || '',
-      emailNorm: normalize(u.email || ''),
-      phone: u.phone || u.phoneNumber || '',
-      membershipType: u.membershipType || u.membership || '',
-      photoURL: u.photoURL || null,
-      activeSubscription: u.activeSubscription || null,
-    })),
+    () =>
+      (sourceUsers || []).map((u) => ({
+        id: u.id,
+        name: u.fullName || u.name || '',
+        nameNorm: normalize(u.fullName || u.name || ''),
+        email: u.email || '',
+        emailNorm: normalize(u.email || ''),
+        phone: u.phone || u.phoneNumber || '',
+        membershipType: u.membershipType || u.membership || '',
+        photoURL: u.photoURL || null,
+        activeSubscription: u.activeSubscription || null,
+      })),
     [sourceUsers]
   );
 
@@ -475,8 +524,12 @@ const ensureUsersLoaded = async () => {
     const q = normalize(qRaw);
     setIsSearching(true);
     try {
-      if (!q || q.length < 2) { setResults([]); return; }
-      const starts = [], contains = [];
+      if (!q || q.length < 2) {
+        setResults([]);
+        return;
+      }
+      const starts = [],
+        contains = [];
       for (const u of allUsersIndexed) {
         if (!u.nameNorm && !u.emailNorm) continue;
         const nameStarts = u.nameNorm.split(' ').some((w) => w.startsWith(q));
@@ -487,81 +540,92 @@ const ensureUsersLoaded = async () => {
         else if (nameContains || emailContains) contains.push(u);
       }
       setResults([...starts, ...contains].slice(0, 20));
-    } finally { setIsSearching(false); }
+    } finally {
+      setIsSearching(false);
+    }
   };
 
   // Link badge in wizard — then apply same membership gate
- const linkBadgeToUser = async () => {
-  if (!selectedUser || !pendingBadgeCode) return;
-  setLinking(true);
-  try {
-    const userRef = doc(db, 'users', selectedUser.id);
-    await updateDoc(userRef, {
-      badge: {
-        id: String(pendingBadgeCode),
-        badgeNumber: Number(pendingBadgeCode),
-        linkedAt: serverTimestamp(),
-        kioskId,
-      },
-    });
-
-    // keep local zero-read index instantly hot
-    updateLocalBadgeIndex(selectedUser.id, pendingBadgeCode);
-
-    if (pendingScanId) {
-      await updateDoc(doc(db, 'scans', pendingScanId), {
-        matchedUserId: selectedUser.id,
-        user: { id: selectedUser.id, name: selectedUser.name, photoURL: selectedUser.photoURL || null },
-        status: 'relinked',
-        relinkedAt: serverTimestamp(),
+  const linkBadgeToUser = async () => {
+    if (!selectedUser || !pendingBadgeCode) return;
+    setLinking(true);
+    try {
+      const userRef = doc(db, 'users', selectedUser.id);
+      await updateDoc(userRef, {
+        badge: {
+          id: String(pendingBadgeCode),
+          badgeNumber: Number(pendingBadgeCode),
+          linkedAt: serverTimestamp(),
+          kioskId,
+        },
       });
-    } else {
-      const ref = await addDoc(collection(db, 'scans'), {
-        badgeCode: pendingBadgeCode,
-        matchedUserId: selectedUser.id,
-        user: { id: selectedUser.id, name: selectedUser.name, photoURL: selectedUser.photoURL || null },
-        status: 'relinked',
-        createdAt: serverTimestamp(),
-        kioskId,
-      });
-      setPendingScanId(ref.id);
+
+      // keep local zero-read index instantly hot
+      updateLocalBadgeIndex(selectedUser.id, pendingBadgeCode);
+
+      if (pendingScanId) {
+        await updateDoc(doc(db, 'scans', pendingScanId), {
+          matchedUserId: selectedUser.id,
+          user: {
+            id: selectedUser.id,
+            name: selectedUser.name,
+            photoURL: selectedUser.photoURL || null,
+          },
+          status: 'relinked',
+          relinkedAt: serverTimestamp(),
+        });
+      } else {
+        const ref = await addDoc(collection(db, 'scans'), {
+          badgeCode: pendingBadgeCode,
+          matchedUserId: selectedUser.id,
+          user: {
+            id: selectedUser.id,
+            name: selectedUser.name,
+            photoURL: selectedUser.photoURL || null,
+          },
+          status: 'relinked',
+          createdAt: serverTimestamp(),
+          kioskId,
+        });
+        setPendingScanId(ref.id);
+      }
+
+      // Fetch freshest user for gating right after linking
+      const enriched = await getFreshUser(db, { id: selectedUser.id, ...selectedUser });
+
+      localStorage.setItem('nova-user', JSON.stringify(enriched));
+      setCurrentUser(enriched);
+
+      const status = getMembershipStatus(enriched);
+      if (status.code !== 'active') {
+        setBlockInfo({ user: enriched, status, scanId: pendingScanId });
+        setShowWizard(false);
+        setShowRelinkModal(false);
+        setLinkDone(false);
+        return;
+      }
+
+      const daysLeft = status.expiresAt
+        ? Math.ceil((toDateSafe(status.expiresAt) - new Date()) / 86400000)
+        : 9999;
+
+      if (daysLeft <= 7) {
+        setHeadsUp({ user: enriched, status, scanId: pendingScanId });
+        setShowWizard(false);
+        setShowRelinkModal(false);
+        setLinkDone(false);
+        return;
+      }
+
+      setLinkDone(true);
+      setTimeout(() => router.replace('/checkin'), 700);
+    } catch (e) {
+      console.error('Badge link error:', e);
+      alert('We hit a snag linking that badge. Please try again or ask the front desk.');
+    } finally {
+      setLinking(false);
     }
-
-    const enriched = { ...selectedUser, badge: { id: String(pendingBadgeCode), badgeNumber: Number(pendingBadgeCode) } };
-    localStorage.setItem('nova-user', JSON.stringify(enriched));
-    setCurrentUser(enriched);
-
-    const status = getMembershipStatus(enriched);
-    if (status.code !== 'active') {
-      setBlockInfo({ user: enriched, status, scanId: pendingScanId });
-      setShowWizard(false);
-      setShowRelinkModal(false);
-      setLinkDone(false);
-      return;
-    }
-
-    const daysLeft = status.expiresAt
-      ? Math.ceil((toDateSafe(status.expiresAt) - new Date()) / 86400000)
-      : 9999;
-
-    if (daysLeft <= 7) {
-      setHeadsUp({ user: enriched, status, scanId: pendingScanId });
-      setShowWizard(false);
-      setShowRelinkModal(false);
-      setLinkDone(false);
-      return;
-    }
-
-    setLinkDone(true);
-    setTimeout(() => router.replace('/checkin'), 700);
-  } catch (e) {
-    console.error('Badge link error:', e);
-    alert('We hit a snag linking that badge. Please try again or ask the front desk.');
-  } finally {
-    setLinking(false);
-  }
-};
-
+  };
 
   // —————————————————————————————————————————————
   // UI
@@ -572,19 +636,28 @@ const ensureUsersLoaded = async () => {
       <div className="pointer-events-none absolute inset-0 -z-10">
         <motion.div
           className="absolute -top-24 -left-24 w-[520px] h-[520px] rounded-full blur-3xl"
-          style={{ background: 'radial-gradient(35% 35% at 50% 50%, rgba(99,102,241,0.45), rgba(99,102,241,0))' }}
+          style={{
+            background:
+              'radial-gradient(35% 35% at 50% 50%, rgba(99,102,241,0.45), rgba(99,102,241,0))',
+          }}
           animate={{ x: [0, 20, -10, 0], y: [0, -10, 15, 0] }}
           transition={{ duration: 18, repeat: Infinity, ease: 'easeInOut' }}
         />
         <motion.div
           className="absolute top-1/3 -right-16 w-[600px] h-[600px] rounded-full blur-[90px]"
-          style={{ background: 'radial-gradient(40% 40% at 50% 50%, rgba(14,165,233,0.40), rgba(14,165,233,0))' }}
+          style={{
+            background:
+              'radial-gradient(40% 40% at 50% 50%, rgba(14,165,233,0.40), rgba(14,165,233,0))',
+          }}
           animate={{ x: [0, -20, 10, 0], y: [0, 10, -15, 0] }}
           transition={{ duration: 22, repeat: Infinity, ease: 'easeInOut' }}
         />
         <motion.div
           className="absolute bottom-[-140px] left-1/3 w-[520px] h-[520px] rounded-full blur-[80px]"
-          style={{ background: 'radial-gradient(45% 45% at 50% 50%, rgba(16,185,129,0.35), rgba(16,185,129,0))' }}
+          style={{
+            background:
+              'radial-gradient(45% 45% at 50% 50%, rgba(16,185,129,0.35), rgba(16,185,129,0))',
+          }}
           animate={{ x: [0, 10, -15, 0], y: [0, -8, 12, 0] }}
           transition={{ duration: 26, repeat: Infinity, ease: 'easeInOut' }}
         />
@@ -597,7 +670,9 @@ const ensureUsersLoaded = async () => {
           <section className="relative rounded-[2rem] overflow-hidden min-h-[620px] border border-slate-200 bg-gradient-to-b from-white/70 via-sky-50/60 to-white backdrop-blur-md shadow-xl">
             {/* Top content */}
             <div className="px-8 md:px-10 pt-8">
-              <h2 className="text-3xl md:text-4xl font-extrabold gradient-text">{greeting}</h2>
+              <h2 className="text-3xl md:text-4xl font-extrabold gradient-text">
+                {greeting}
+              </h2>
               <p className="text-slate-500 mt-1">{phrase}</p>
 
               <div className="mt-6 max-w-xl">
@@ -605,19 +680,24 @@ const ensureUsersLoaded = async () => {
                   Place your badge on the scanner
                 </h1>
                 <p className="mt-2 text-slate-600">
-                  Hold your card steady for a second. You&apos;ll hear a chime and we&apos;ll do the rest.
+                  Hold your card steady for a second. You&apos;ll hear a chime and we&apos;ll do
+                  the rest.
                 </p>
               </div>
             </div>
 
             {/* Gray scan glyph — aligned under the copy column */}
-            <div
-              className="absolute"
-              style={{ left: 40, top: '52%', transform: 'translateY(-50%)' }}
-            >
+            <div className="absolute" style={{ left: 40, top: '52%', transform: 'translateY(-50%)' }}>
               <motion.div
-                animate={{ scale: isReading ? [1, 1.08, 1] : 1, opacity: isReading ? [0.45, 1, 0.45] : 0.35 }}
-                transition={{ repeat: isReading ? Infinity : 0, duration: 1.6, ease: 'easeInOut' }}
+                animate={{
+                  scale: isReading ? [1, 1.08, 1] : 1,
+                  opacity: isReading ? [0.45, 1, 0.45] : 0.35,
+                }}
+                transition={{
+                  repeat: isReading ? Infinity : 0,
+                  duration: 1.6,
+                  ease: 'easeInOut',
+                }}
               >
                 <ScanLine className="text-slate-700" style={{ width: 64, height: 64 }} strokeWidth={1.8} />
               </motion.div>
@@ -746,9 +826,7 @@ const ensureUsersLoaded = async () => {
               </div>
               <p className="text-slate-600 mt-2 max-w-md">
                 Your membership is still active, but it expires in{' '}
-                <span className="font-semibold">
-                  {formatCountdown(headsUp.status.expiresAt)}
-                </span>.
+                <span className="font-semibold">{formatCountdown(headsUp.status.expiresAt)}</span>.
               </p>
               <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
                 <button
@@ -852,16 +930,26 @@ const ensureUsersLoaded = async () => {
               exit={{ y: 8, opacity: 0, scale: 0.98 }}
               transition={{ type: 'spring', stiffness: 300, damping: 28 }}
               className="w-full max-w-lg rounded-[2rem] text-center flex flex-col items-center"
-              style={{ backgroundColor: '#ffffff', padding: '2.5rem', gap: '1.25rem', boxShadow: '0 8px 30px rgba(0,0,0,0.15)' }}
+              style={{
+                backgroundColor: '#ffffff',
+                padding: '2.5rem',
+                gap: '1.25rem',
+                boxShadow: '0 8px 30px rgba(0,0,0,0.15)',
+              }}
             >
-              <div><AlertCircle className="w-14 h-14" style={{ color: '#f97316' }} /></div>
+              <div>
+                <AlertCircle className="w-14 h-14" style={{ color: '#f97316' }} />
+              </div>
               <h2 className="text-2xl font-bold text-slate-900">Hey there!</h2>
               <p className="text-base leading-relaxed text-slate-600 max-w-md mx-auto">
                 We couldn’t match that badge yet. Let’s <span className="font-semibold">link it to your membership</span>. I can walk you through it, or you can get help from our front desk.
               </p>
 
               <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
-                <button onClick={openWizard} className="h-12 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition active:scale-[0.99]">
+                <button
+                  onClick={openWizard}
+                  className="h-12 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition active:scale-[0.99]"
+                >
                   Guide me
                 </button>
                 <button
@@ -876,7 +964,10 @@ const ensureUsersLoaded = async () => {
               {!helpNotified && <div className="text-xs text-slate-500 mt-2">Auto closing in {dismissIn}s</div>}
               {helpNotified && <div className="text-sm text-slate-600 mt-2">We’ve let the front desk know. Please see someone there.</div>}
 
-              <button onClick={closeRelinkAndWizard} className="mt-3 h-10 px-5 rounded-full bg-slate-900 text-white font-medium hover:opacity-90">
+              <button
+                onClick={closeRelinkAndWizard}
+                className="mt-3 h-10 px-5 rounded-full bg-slate-900 text-white font-medium hover:opacity-90"
+              >
                 OK
               </button>
             </motion.div>
@@ -906,11 +997,15 @@ const ensureUsersLoaded = async () => {
                 <div>
                   <h3 className="text-xl md:text-2xl font-bold text-slate-900">Assign badge to your membership</h3>
                   <p className="text-slate-600 mt-1">
-                    Type your <span className="font-semibold">first and last name</span>, pick your membership, and we’ll
-                    link badge <span className="font-mono">{pendingBadgeCode || '—'}</span>.
+                    Type your <span className="font-semibold">first and last name</span>, pick your membership, and we’ll link badge{' '}
+                    <span className="font-mono">{pendingBadgeCode || '—'}</span>.
                   </p>
                 </div>
-                {linkDone ? <CheckCircle2 className="w-7 h-7 text-green-600" /> : <Search className="w-7 h-7 text-slate-400" />}
+                {linkDone ? (
+                  <CheckCircle2 className="w-7 h-7 text-green-600" />
+                ) : (
+                  <Search className="w-7 h-7 text-slate-400" />
+                )}
               </div>
 
               {/* Search input */}
@@ -920,7 +1015,9 @@ const ensureUsersLoaded = async () => {
                   <input
                     value={nameQuery}
                     onChange={(e) => setNameQuery(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') searchCandidates(); }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') searchCandidates();
+                    }}
                     placeholder="e.g., Jane Doe"
                     className="flex-1 h-12 px-4 rounded-xl border border-slate-200 focus:outline-none focus:ring-4 focus:ring-blue-100"
                   />
@@ -931,17 +1028,23 @@ const ensureUsersLoaded = async () => {
                     {isSearching ? 'Searching…' : 'Search'}
                   </button>
                 </div>
-                <p className="text-xs text-slate-500 mt-2">Tip: Use full name for best results. If you don’t see yourself, try a different spelling.</p>
+                <p className="text-xs text-slate-500 mt-2">
+                  Tip: Use full name for best results. If you don’t see yourself, try a different spelling.
+                </p>
               </div>
 
               {/* Results */}
               <div className="mt-5 space-y-2 max-h-64 overflow-auto pr-1">
-                {results.length === 0 && !isSearching && <div className="text-slate-500 text-sm">No results yet — try searching your full name.</div>}
+                {results.length === 0 && !isSearching && (
+                  <div className="text-slate-500 text-sm">No results yet — try searching your full name.</div>
+                )}
                 {results.map((u) => (
                   <button
                     key={u.id}
                     onClick={() => setSelectedUser(u)}
-                    className={`w-full text-left p-3 rounded-xl border transition ${selectedUser?.id === u.id ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'}`}
+                    className={`w-full text-left p-3 rounded-xl border transition ${
+                      selectedUser?.id === u.id ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'
+                    }`}
                   >
                     <div className="flex items-center gap-3">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -967,7 +1070,10 @@ const ensureUsersLoaded = async () => {
                   {linking ? 'Linking…' : selectedUser ? `Link badge to ${selectedUser.name}` : 'Select your membership'}
                 </button>
                 <button
-                  onClick={() => { setShowWizard(false); setShowRelinkModal(true); }}
+                  onClick={() => {
+                    setShowWizard(false);
+                    setShowRelinkModal(true);
+                  }}
                   className="h-12 px-5 rounded-full bg-white border border-slate-200 text-slate-800 font-semibold hover:bg-slate-50"
                 >
                   Back
@@ -995,9 +1101,15 @@ const ensureUsersLoaded = async () => {
           animation: gc-shimmer 3s ease-in-out infinite;
         }
         @keyframes gc-shimmer {
-          0% { background-position: 0% 50%; }
-          50% { background-position: 100% 50%; }
-          100% { background-position: 0% 50%; }
+          0% {
+            background-position: 0% 50%;
+          }
+          50% {
+            background-position: 100% 50%;
+          }
+          100% {
+            background-position: 0% 50%;
+          }
         }
       `}</style>
     </div>
