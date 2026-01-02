@@ -673,9 +673,9 @@ const ensureUsersLoaded = async () => {
                 textClass="text-blue-700"
               />
               <DashCard
-                title="Gallery"
+                title="Studios"
                 subtitle="See projects members made"
-                href="/gallery"
+                href="/studios"
                 icon={<ImageIcon className="w-7 h-7 text-pink-600" />}
                 accent="from-pink-50/70 to-white/70"
                 textClass="text-pink-700"

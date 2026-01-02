@@ -247,7 +247,7 @@ export const UserProvider = ({ children }) => {
       try {
         const stored = localStorage.getItem('nova-user');
 
-        if (pathname.startsWith('/sessions')) {
+        if (pathname.startsWith('/studios')) {
           // Skip auth enforcement on migration route
           await fetchAllUsers();
           await refreshRoles(false);
