@@ -25,6 +25,7 @@ import { db } from '../lib/firebase';
 import { useRouter, usePathname } from 'next/navigation';
 
 const UserContext = createContext(null);
+const DISABLE_AUTO_REDIRECTS = true;
 
 // ---- Roles cache (localStorage) ----
 const ROLES_CACHE_KEY = 'nova-roles-v1';
@@ -266,7 +267,13 @@ export const UserProvider = ({ children }) => {
           if (s.exists()) setCurrentUser({ id: s.id, ...s.data() });
           else {
             localStorage.removeItem('nova-user');
-            router.replace('/');
+if (!DISABLE_AUTO_REDIRECTS) {
+  router.replace('/');
+  return;
+}
+// If redirects are disabled, just continue with a null user.
+setCurrentUser(null);
+
             return;
           }
 
@@ -278,7 +285,7 @@ export const UserProvider = ({ children }) => {
           // Optional: load whole pool (uses cache after first run)
           await fetchAllUsers();
         } else {
-          router.replace('/');
+if (!DISABLE_AUTO_REDIRECTS) router.replace('/');
         }
 
         await refreshRoles(false);
