@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import {
@@ -18,6 +18,8 @@ import {
   UserPlus,
   CheckCircle2,
   LayoutDashboard,
+  X,
+  Trash,
 } from 'lucide-react';
 
 import {
@@ -30,6 +32,7 @@ import {
   serverTimestamp,
   doc,
   setDoc,
+  deleteDoc,
 } from 'firebase/firestore';
 
 import { app } from '@/app/lib/firebase';
@@ -43,7 +46,7 @@ const db = getFirestore(app);
 const STUDIOS = 'studios';
 const SUBS = {
   tools: 'tools',
-  machines: 'machines',
+  // machines subcollection kept for backwards compatibility; UI now uses global /machines
   materials: 'materials',
   mentors: 'mentors',
   gallery: 'gallery',
@@ -63,7 +66,6 @@ async function fileToDataURL(file) {
   });
 }
 
-// Compress to JPEG, maxWidth ~1600px, adjustable quality (0.85 default)
 async function compressImageToDataURL(file, { maxWidth = 1600, quality = 0.85 } = {}) {
   const src = await fileToDataURL(file);
   const img = document.createElement('img');
@@ -86,16 +88,14 @@ async function compressImageToDataURL(file, { maxWidth = 1600, quality = 0.85 } 
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-  // Always JPEG to keep size small
-  const out = canvas.toDataURL('image/jpeg', quality);
-  return out;
+  return canvas.toDataURL('image/jpeg', quality);
 }
 
 // -----------------------------------------------------------------------------
 // page
 // -----------------------------------------------------------------------------
 export default function StudiosPage() {
-  const { allUsers, refreshUsers } = useUser();
+  const { allUsers, refreshUsers, can } = useUser();
 
   const [studios, setStudios] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -121,11 +121,13 @@ export default function StudiosPage() {
 
   // live studios
   useEffect(() => {
-    const q = query(collection(db, STUDIOS), orderBy('createdAt', 'desc'));
-    const unsub = onSnapshot(q, (snap) => {
+    const qRef = query(collection(db, STUDIOS), orderBy('createdAt', 'desc'));
+    const unsub = onSnapshot(qRef, (snap) => {
       const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       setStudios(list);
-      try { localStorage.setItem(LS_STUDIOS, JSON.stringify(list)); } catch {}
+      try {
+        localStorage.setItem(LS_STUDIOS, JSON.stringify(list));
+      } catch {}
     });
     return () => unsub();
   }, []);
@@ -134,9 +136,7 @@ export default function StudiosPage() {
     const q = (search || '').toLowerCase().trim();
     if (!q) return studios;
     return studios.filter(
-      (s) =>
-        s.name?.toLowerCase().includes(q) ||
-        s.description?.toLowerCase().includes(q)
+      (s) => s.name?.toLowerCase().includes(q) || s.description?.toLowerCase().includes(q)
     );
   }, [studios, search]);
 
@@ -150,56 +150,36 @@ export default function StudiosPage() {
     if (!creatingData.name.trim() || !coverFile) return;
     setSavingStudio(true);
     try {
-      // compress to keep doc < ~1MB
-      const coverData = await compressImageToDataURL(coverFile, { maxWidth: 1600, quality: 0.85 });
-
-      // Optional safety check: Firestore has 1MB/doc limit (binary + metadata)
-      // ~ We can warn if dataURL length is huge
+      let coverData = await compressImageToDataURL(coverFile, { maxWidth: 1600, quality: 0.85 });
       if (coverData.length > 900_000) {
-        // dataURL char length is bigger than raw bytes, but good early indicator
-        // If too big, retry lower quality quickly
         const retry = await compressImageToDataURL(coverFile, { maxWidth: 1400, quality: 0.75 });
-        if (retry.length < coverData.length) {
-          // eslint-disable-next-line no-console
-          console.warn('Cover image compressed further to fit document limits.');
-          // use retry variant
-          // (still not strictly guaranteed under 1MB, but helps a lot)
-          await addStudioDoc(retry);
-          return;
-        }
+        if (retry.length < coverData.length) coverData = retry;
       }
 
-      await addStudioDoc(coverData);
-    } catch (e) {
-      console.error('Create studio failed', e);
-      alert('Could not create studio. Please try again.');
-    } finally {
-      setSavingStudio(false);
-    }
-
-    async function addStudioDoc(coverDataUrl) {
-      // Store the data URL directly on doc
       await addDoc(collection(db, STUDIOS), {
         name: creatingData.name.trim(),
         description: creatingData.description?.trim() || '',
-        coverData: coverDataUrl, // << stored directly
+        coverData,
         createdAt: serverTimestamp(),
       });
 
       setCreating(false);
       setCreatingData({ name: '', description: '' });
       setCoverFile(null);
+    } catch (e) {
+      console.error('Create studio failed', e);
+      alert('Could not create studio. Please try again.');
+    } finally {
+      setSavingStudio(false);
     }
   };
-
-  const anySelected = !!selected;
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white text-slate-900">
       <BokehBackground />
 
       <div className="max-w-7xl mx-auto px-6 py-10">
-        {/* Header with Back */}
+        {/* Header with Back (goes to "/") */}
         <div className="flex flex-wrap items-center gap-3 justify-between">
           <div className="flex items-center gap-3">
             <Link
@@ -209,59 +189,72 @@ export default function StudiosPage() {
               <ChevronLeft className="w-5 h-5" />
             </Link>
             <div>
-              <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight gradient-text">Studios</h1>
-              <p className="text-slate-600 mt-1">Explore workspaces, gear, and mentors. Tap a studio to dive in.</p>
+              <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight gradient-text">
+                Studios
+              </h1>
+              <p className="text-slate-600 mt-1">
+                Explore workspaces, gear, and mentors. Tap a studio to dive in.
+              </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-              <input
-                placeholder="Search studios…"
-                className="h-11 pl-9 pr-3 rounded-2xl border border-slate-200 bg-white/70 backdrop-blur focus:outline-none focus:ring-4 focus:ring-blue-100"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
+          {!selected ? (
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input
+                  placeholder="Search studios…"
+                  className="h-11 pl-9 pr-3 rounded-2xl border border-slate-200 bg-white/70 backdrop-blur focus:outline-none focus:ring-4 focus:ring-blue-100"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
+              <button
+                onClick={startCreate}
+                className="h-11 px-4 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-md flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" />
+                New Studio
+              </button>
             </div>
-            <button
-              onClick={startCreate}
-              className="h-11 px-4 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-md flex items-center gap-2"
-            >
-              <Plus className="w-4 h-4" />
-              New Studio
-            </button>
-          </div>
+          ) : null}
         </div>
 
         <LayoutGroup>
-          {/* Grid — hide other cards when expanded (only selected remains) */}
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 mt-6">
-            {filtered.map((s) => {
-              const isSelected = selected?.id === s.id;
-              const hideThis = anySelected && !isSelected;
-              return (
-                <div key={s.id} className={hideThis ? 'hidden' : ''}>
-                  <StudioCard
-                    studio={s}
-                    isSelected={isSelected}
-                    onOpen={() => setSelected(s)}
-                  />
+          {/* IMPORTANT: when a studio is selected, we do NOT render the grid at all.
+              This prevents the "small tile stays" behavior and lets the detail fill the space. */}
+          <AnimatePresence mode="wait">
+            {!selected ? (
+              <motion.div
+                key="studio-grid"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className="mt-6"
+              >
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                  {filtered.map((s) => (
+                    <StudioCard key={s.id} studio={s} onOpen={() => setSelected(s)} />
+                  ))}
                 </div>
-              );
-            })}
-          </div>
-
-          {/* Expanded view */}
-          <AnimatePresence>
-            {selected && (
-              <StudioExpanded
-                key={`expanded-${selected.id}`}
-                studioId={selected.id}
-                initialData={selected}
-                allUsers={allUsers || []}
-                onClose={() => setSelected(null)}
-              />
+              </motion.div>
+            ) : (
+              <motion.div
+                key={`studio-expanded-wrap-${selected.id}`}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className="mt-6"
+              >
+                <StudioExpanded
+                  studioId={selected.id}
+                  initialData={selected}
+                  allUsers={allUsers || []}
+                  onClose={() => setSelected(null)}
+                  canCreateMachines={!!can?.('createMachines')}
+                  canManageEmployees={!!can?.('manageEmployees')}
+                />
+              </motion.div>
             )}
           </AnimatePresence>
         </LayoutGroup>
@@ -271,7 +264,9 @@ export default function StudiosPage() {
       <AnimatePresence>
         {creating && (
           <motion.div
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
             className="fixed inset-0 z-[60] grid place-items-center bg-slate-900/10 backdrop-blur-sm"
           >
             <motion.div
@@ -283,7 +278,12 @@ export default function StudiosPage() {
             >
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-xl font-bold">Create Studio</h3>
-                <button onClick={() => setCreating(false)} className="text-slate-500 hover:text-slate-700">Close</button>
+                <button
+                  onClick={() => setCreating(false)}
+                  className="text-slate-500 hover:text-slate-700"
+                >
+                  Close
+                </button>
               </div>
 
               <div className="space-y-3">
@@ -301,7 +301,9 @@ export default function StudiosPage() {
                 />
 
                 <div className="block">
-                  <div className="text-sm font-medium text-slate-700 mb-1">Cover Image (stored in Firestore)</div>
+                  <div className="text-sm font-medium text-slate-700 mb-1">
+                    Cover Image (stored in Firestore)
+                  </div>
                   <label className="flex items-center gap-3 rounded-xl border border-dashed border-slate-300 bg-white/60 backdrop-blur p-4 cursor-pointer hover:bg-white">
                     <Upload className="w-5 h-5 text-slate-500" />
                     <span className="text-sm text-slate-600">
@@ -353,9 +355,15 @@ export default function StudiosPage() {
           animation: gc-shimmer 3s ease-in-out infinite;
         }
         @keyframes gc-shimmer {
-          0% { background-position: 0% 50%; }
-          50% { background-position: 100% 50%; }
-          100% { background-position: 0% 50%; }
+          0% {
+            background-position: 0% 50%;
+          }
+          50% {
+            background-position: 100% 50%;
+          }
+          100% {
+            background-position: 0% 50%;
+          }
         }
       `}</style>
     </div>
@@ -370,19 +378,28 @@ function BokehBackground() {
     <div className="pointer-events-none absolute inset-0 -z-10">
       <motion.div
         className="absolute -top-24 -left-24 w-[520px] h-[520px] rounded-full blur-3xl"
-        style={{ background: 'radial-gradient(35% 35% at 50% 50%, rgba(99,102,241,0.45), rgba(99,102,241,0))' }}
+        style={{
+          background:
+            'radial-gradient(35% 35% at 50% 50%, rgba(99,102,241,0.45), rgba(99,102,241,0))',
+        }}
         animate={{ x: [0, 20, -10, 0], y: [0, -10, 15, 0] }}
         transition={{ duration: 18, repeat: Infinity, ease: 'easeInOut' }}
       />
       <motion.div
         className="absolute top-1/3 -right-16 w-[600px] h-[600px] rounded-full blur-[90px]"
-        style={{ background: 'radial-gradient(40% 40% at 50% 50%, rgba(14,165,233,0.40), rgba(14,165,233,0))' }}
+        style={{
+          background:
+            'radial-gradient(40% 40% at 50% 50%, rgba(14,165,233,0.40), rgba(14,165,233,0))',
+        }}
         animate={{ x: [0, -20, 10, 0], y: [0, 10, -15, 0] }}
         transition={{ duration: 22, repeat: Infinity, ease: 'easeInOut' }}
       />
       <motion.div
         className="absolute bottom-[-140px] left-1/3 w-[520px] h-[520px] rounded-full blur-[80px]"
-        style={{ background: 'radial-gradient(45% 45% at 50% 50%, rgba(16,185,129,0.35), rgba(16,185,129,0))' }}
+        style={{
+          background:
+            'radial-gradient(45% 45% at 50% 50%, rgba(16,185,129,0.35), rgba(16,185,129,0))',
+        }}
         animate={{ x: [0, 10, -15, 0], y: [0, -8, 12, 0] }}
         transition={{ duration: 26, repeat: Infinity, ease: 'easeInOut' }}
       />
@@ -423,22 +440,18 @@ function LabeledTextarea({ label, value, onChange, placeholder }) {
 // -----------------------------------------------------------------------------
 // grid card
 // -----------------------------------------------------------------------------
-function StudioCard({ studio, onOpen, isSelected }) {
+function StudioCard({ studio, onOpen }) {
   const coverSrc = studio.coverData || studio.coverUrl || '/placeholder.png';
   return (
     <motion.button
       layout
       layoutId={`studio-${studio.id}`}
       onClick={onOpen}
-      className={`group relative text-left rounded-[1.6rem] overflow-hidden border border-slate-200 bg-white/70 backdrop-blur hover:bg-white/85 transition shadow-xl ${isSelected ? 'ring-2 ring-sky-400' : ''}`}
+      className="group relative text-left rounded-[1.6rem] overflow-hidden border border-slate-200 bg-white/70 backdrop-blur hover:bg-white/85 transition shadow-xl"
     >
       <div className="relative h-48">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={coverSrc}
-          alt={studio.name}
-          className="absolute inset-0 w-full h-full object-cover"
-        />
+        <img src={coverSrc} alt={studio.name} className="absolute inset-0 w-full h-full object-cover" />
         <div className="absolute inset-0 bg-gradient-to-t from-black/35 via-black/10 to-transparent" />
       </div>
       <div className="p-4">
@@ -449,8 +462,7 @@ function StudioCard({ studio, onOpen, isSelected }) {
         <p className="text-sm text-slate-600 mt-1">
           {(studio.description || '').length > 110
             ? `${studio.description.slice(0, 110)}…`
-            : (studio.description || '')
-          }
+            : studio.description || ''}
         </p>
       </div>
     </motion.button>
@@ -460,16 +472,26 @@ function StudioCard({ studio, onOpen, isSelected }) {
 // -----------------------------------------------------------------------------
 // expanded view
 // -----------------------------------------------------------------------------
-function StudioExpanded({ studioId, initialData, allUsers, onClose }) {
+function StudioExpanded({
+  studioId,
+  initialData,
+  allUsers,
+  onClose,
+  canCreateMachines,
+  canManageEmployees,
+}) {
   const [studio, setStudio] = useState(initialData);
   const [tab, setTab] = useState('about');
 
   const [tools, setTools] = useState([]);
-  const [machines, setMachines] = useState([]);
   const [materials, setMaterials] = useState([]);
   const [mentors, setMentors] = useState([]);
   const [gallery, setGallery] = useState([]);
 
+  // GLOBAL machines from /machines
+  const [machines, setMachines] = useState([]);
+
+  // Studio + subs
   useEffect(() => {
     const unsubStudio = onSnapshot(doc(db, STUDIOS, studioId), (d) => {
       if (d.exists()) setStudio({ id: d.id, ...d.data() });
@@ -478,20 +500,39 @@ function StudioExpanded({ studioId, initialData, allUsers, onClose }) {
     const unsubTools = onSnapshot(collection(db, STUDIOS, studioId, SUBS.tools), (snap) =>
       setTools(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
     );
-    const unsubMachines = onSnapshot(collection(db, STUDIOS, studioId, SUBS.machines), (snap) =>
-      setMachines(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
-    );
+
     const unsubMaterials = onSnapshot(collection(db, STUDIOS, studioId, SUBS.materials), (snap) =>
       setMaterials(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
     );
+
     const unsubMentors = onSnapshot(collection(db, STUDIOS, studioId, SUBS.mentors), (snap) =>
       setMentors(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
     );
+
     const unsubGallery = onSnapshot(collection(db, STUDIOS, studioId, SUBS.gallery), (snap) =>
       setGallery(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
     );
 
-    return () => { unsubStudio(); unsubTools(); unsubMachines(); unsubMaterials(); unsubMentors(); unsubGallery(); };
+    return () => {
+      unsubStudio();
+      unsubTools();
+      unsubMaterials();
+      unsubMentors();
+      unsubGallery();
+    };
+  }, [studioId]);
+
+  // Machines: listen to global /machines and filter client-side (robust to schema changes)
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'machines'), (snap) => {
+      const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const filtered = all.filter((m) => {
+        const sid = m.studioId || m.studio?.id || m.studio?.docId;
+        return String(sid || '') === String(studioId);
+      });
+      setMachines(filtered);
+    });
+    return () => unsub();
   }, [studioId]);
 
   const counts = {
@@ -505,7 +546,7 @@ function StudioExpanded({ studioId, initialData, allUsers, onClose }) {
   const coverSrc = studio.coverData || studio.coverUrl || '/placeholder.png';
 
   return (
-    <motion.div layout className="mt-6">
+    <motion.div layout className="w-full">
       <motion.div
         layout
         layoutId={`studio-${studioId}`}
@@ -516,12 +557,15 @@ function StudioExpanded({ studioId, initialData, allUsers, onClose }) {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={coverSrc} alt={studio.name} className="absolute inset-0 w-full h-full object-cover" />
           <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-black/15 to-transparent" />
+
           <div className="absolute top-4 left-4 flex gap-2">
             <button
               onClick={onClose}
               className="px-3 h-10 rounded-full bg-white/85 border border-white/50 text-slate-800 font-medium hover:bg-white"
             >
-              <span className="inline-flex items-center gap-1"><ChevronLeft className="w-4 h-4" /> Back</span>
+              <span className="inline-flex items-center gap-1">
+                <ChevronLeft className="w-4 h-4" /> Back
+              </span>
             </button>
             <Link
               href="/dashboard"
@@ -538,10 +582,13 @@ function StudioExpanded({ studioId, initialData, allUsers, onClose }) {
               Done
             </Link>
           </div>
+
           <div className="absolute bottom-4 left-4 text-white drop-shadow">
             <h2 className="text-2xl md:text-3xl font-bold">{studio.name}</h2>
             <p className="opacity-90 max-w-2xl">
-              {(studio.description || '').length > 220 ? `${studio.description.slice(0,220)}…` : (studio.description || '')}
+              {(studio.description || '').length > 220
+                ? `${studio.description.slice(0, 220)}…`
+                : studio.description || ''}
             </p>
           </div>
         </div>
@@ -561,10 +608,39 @@ function StudioExpanded({ studioId, initialData, allUsers, onClose }) {
         {/* content */}
         <div className="p-5">
           {tab === 'about' && <AboutBlock studio={studio} counts={counts} />}
-          {tab === 'tools' && <ItemsBlock studioId={studioId} path={SUBS.tools} title="Tools" icon={Hammer} emptyCta="Add a tool" />}
-          {tab === 'machines' && <ItemsBlock studioId={studioId} path={SUBS.machines} title="Machines" icon={Wrench} emptyCta="Add a machine" />}
-          {tab === 'materials' && <ItemsBlock studioId={studioId} path={SUBS.materials} title="Materials" icon={Box} emptyCta="Add a material" />}
-          {tab === 'mentors' && <MentorsBlock studioId={studioId} mentors={mentors} allUsers={allUsers} />}
+
+          {tab === 'tools' && (
+            <ItemsBlock studioId={studioId} path={SUBS.tools} title="Tools" icon={Hammer} emptyCta="Add a tool" />
+          )}
+
+          {tab === 'machines' && (
+            <MachinesBlock
+              studioId={studioId}
+              studioName={studio?.name || ''}
+              machines={machines}
+              canCreateMachines={canCreateMachines}
+            />
+          )}
+
+          {tab === 'materials' && (
+            <ItemsBlock
+              studioId={studioId}
+              path={SUBS.materials}
+              title="Materials"
+              icon={Box}
+              emptyCta="Add a material"
+            />
+          )}
+
+          {tab === 'mentors' && (
+            <MentorsBlock
+              studioId={studioId}
+              mentors={mentors}
+              allUsers={allUsers}
+              canManageEmployees={canManageEmployees}
+            />
+          )}
+
           {tab === 'gallery' && <GalleryBlock studioId={studioId} gallery={gallery} />}
         </div>
       </motion.div>
@@ -579,13 +655,19 @@ function TabBtn({ icon, label, active, onClick, badge }) {
   return (
     <button
       onClick={onClick}
-      className={`h-10 px-4 rounded-full border transition backdrop-blur ${active ? 'bg-slate-900 text-white border-slate-900' : 'bg-white/70 text-slate-800 border-slate-200 hover:bg-white'}`}
+      className={`h-10 px-4 rounded-full border transition backdrop-blur ${
+        active
+          ? 'bg-slate-900 text-white border-slate-900'
+          : 'bg-white/70 text-slate-800 border-slate-200 hover:bg-white'
+      }`}
     >
       <span className="inline-flex items-center gap-2">
         {icon}
         {label}
         {typeof badge === 'number' ? (
-          <span className={`ml-1 text-xs px-2 py-0.5 rounded-full ${active ? 'bg-white/20' : 'bg-slate-100 text-slate-600'}`}>{badge}</span>
+          <span className={`ml-1 text-xs px-2 py-0.5 rounded-full ${active ? 'bg-white/20' : 'bg-slate-100 text-slate-600'}`}>
+            {badge}
+          </span>
         ) : null}
       </span>
     </button>
@@ -607,13 +689,18 @@ function AboutBlock({ studio, counts }) {
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
       <div className="md:col-span-2">
         <div className="rounded-2xl border border-slate-200 bg-white/70 backdrop-blur p-4">
-          <h4 className="font-semibold flex items-center gap-2"><Info className="w-4 h-4 text-slate-600" /> About this studio</h4>
+          <h4 className="font-semibold flex items-center gap-2">
+            <Info className="w-4 h-4 text-slate-600" /> About this studio
+          </h4>
           <p className="text-slate-700 mt-2 leading-relaxed">{studio.description || '—'}</p>
         </div>
       </div>
       <div className="space-y-3">
         {pills.map((p) => (
-          <div key={p.k} className="rounded-2xl border border-slate-200 bg-white/70 backdrop-blur p-3 flex items-center justify-between">
+          <div
+            key={p.k}
+            className="rounded-2xl border border-slate-200 bg-white/70 backdrop-blur p-3 flex items-center justify-between"
+          >
             <div className="capitalize text-slate-700">{p.k}</div>
             <div className="font-semibold text-slate-900">{p.n}</div>
           </div>
@@ -638,8 +725,13 @@ function ItemsBlock({ studioId, path, title, icon: Icon, emptyCta }) {
   const addItem = async () => {
     const n = name.trim();
     if (!n) return;
-    await addDoc(collection(db, STUDIOS, studioId, path), { name: n, note: note?.trim() || '', createdAt: serverTimestamp() });
-    setName(''); setNote('');
+    await addDoc(collection(db, STUDIOS, studioId, path), {
+      name: n,
+      note: note?.trim() || '',
+      createdAt: serverTimestamp(),
+    });
+    setName('');
+    setNote('');
   };
 
   return (
@@ -689,10 +781,195 @@ function ItemsBlock({ studioId, path, title, icon: Icon, emptyCta }) {
   );
 }
 
-function MentorsBlock({ studioId, mentors, allUsers }) {
+// -----------------------------------------------------------------------------
+// Machines (GLOBAL /machines) — create requires createMachines permission
+// -----------------------------------------------------------------------------
+function MachinesBlock({ studioId, studioName, machines, canCreateMachines }) {
+  const [creating, setCreating] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const [name, setName] = useState('');
+  const [studio, setStudio] = useState(studioName || '');
+  const [status, setStatus] = useState('available'); // optional field
+
+  useEffect(() => setStudio(studioName || ''), [studioName]);
+
+  const openCreate = () => {
+    setName('');
+    setStatus('available');
+    setCreating(true);
+  };
+
+  const createMachine = async () => {
+    if (!canCreateMachines) return;
+    const n = name.trim();
+    if (!n) return;
+    setSaving(true);
+    try {
+      await addDoc(collection(db, 'machines'), {
+        name: n,
+        studioId,
+        studioName: studio || studioName || '',
+        status,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      setCreating(false);
+    } catch (e) {
+      console.error('Create machine failed', e);
+      alert('Could not create machine.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeMachine = async (m) => {
+    if (!canCreateMachines) return;
+    const ok = window.confirm(`Remove machine "${m.name}"?`);
+    if (!ok) return;
+    try {
+      await deleteDoc(doc(db, 'machines', m.id));
+    } catch (e) {
+      console.error('Delete machine failed', e);
+      alert('Could not remove machine.');
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-3">
+        <div className="flex items-center gap-2">
+          <Wrench className="w-5 h-5 text-slate-700" />
+          <h4 className="font-semibold">Machines</h4>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Link
+            href="/machines"
+            className="h-10 px-4 rounded-full bg-white/70 border border-slate-200 text-slate-800 font-semibold hover:bg-white inline-flex items-center gap-2"
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            View all machines
+          </Link>
+
+          <button
+            onClick={openCreate}
+            disabled={!canCreateMachines}
+            className="h-10 px-4 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-2"
+            title={!canCreateMachines ? 'Requires createMachines permission' : 'Add a machine'}
+          >
+            <Plus className="w-4 h-4" />
+            Add machine
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {machines.map((m) => (
+          <div key={m.id} className="rounded-2xl border border-slate-200 bg-white/70 backdrop-blur p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-semibold truncate">{m.name}</div>
+                <div className="text-xs text-slate-500 mt-1">
+                  {m.status ? `Status: ${m.status}` : '—'}
+                </div>
+              </div>
+
+              {canCreateMachines ? (
+                <button
+                  onClick={() => removeMachine(m)}
+                  className="p-2 rounded-xl border border-slate-200 bg-white/70 hover:bg-white text-rose-600"
+                  title="Remove machine"
+                >
+                  <Trash className="w-4 h-4" />
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ))}
+
+        {machines.length === 0 && (
+          <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 backdrop-blur p-4 text-slate-500">
+            No machines yet.
+          </div>
+        )}
+      </div>
+
+      <AnimatePresence>
+        {creating && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[70] grid place-items-center bg-slate-900/10 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ y: 24, opacity: 0, scale: 0.98 }}
+              animate={{ y: 0, opacity: 1, scale: 1 }}
+              exit={{ y: 12, opacity: 0, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 320, damping: 26 }}
+              className="w-[min(92vw,40rem)] rounded-[2rem] bg-white/90 backdrop-blur-xl border border-white/40 shadow-2xl p-6"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold">Add Machine</h3>
+                <button onClick={() => setCreating(false)} className="text-slate-500 hover:text-slate-700">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {!canCreateMachines ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-800 text-sm">
+                  You do not have permission to create machines. (Requires <span className="font-semibold">createMachines</span>)
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <LabeledInput label="Machine name" value={name} onChange={setName} placeholder="e.g., Epilog Laser Engraver" />
+                  <LabeledInput label="Studio" value={studio} onChange={setStudio} placeholder="Studio name (optional)" />
+                  <label className="block">
+                    <div className="text-sm font-medium text-slate-700 mb-1">Status</div>
+                    <select
+                      value={status}
+                      onChange={(e) => setStatus(e.target.value)}
+                      className="w-full h-11 px-4 rounded-xl border border-slate-200 bg-white/80 focus:outline-none focus:ring-4 focus:ring-blue-100"
+                    >
+                      <option value="available">available</option>
+                      <option value="offline">offline</option>
+                      <option value="maintenance">maintenance</option>
+                    </select>
+                  </label>
+
+                  <div className="flex justify-end gap-2 pt-2">
+                    <button
+                      onClick={() => setCreating(false)}
+                      className="h-11 px-4 rounded-full bg-white border border-slate-200 text-slate-800 font-semibold hover:bg-slate-50"
+                      disabled={saving}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={createMachine}
+                      className="h-11 px-4 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-60"
+                      disabled={saving || !name.trim()}
+                    >
+                      {saving ? 'Saving…' : 'Create'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Mentors — manage requires manageEmployees permission
+// -----------------------------------------------------------------------------
+function MentorsBlock({ studioId, mentors, allUsers, canManageEmployees }) {
   const [search, setSearch] = useState('');
 
-  // Pick from YOUR users database (context-provided list)
   const candidates = useMemo(() => {
     const q = (search || '').toLowerCase().trim();
     const list = (allUsers || []).map((u) => ({
@@ -700,10 +977,15 @@ function MentorsBlock({ studioId, mentors, allUsers }) {
       name: u.fullName || u.name || 'Unnamed',
       photoURL: u.photoURL || null,
     }));
-    return q ? list.filter((u) => u.name.toLowerCase().includes(q)) : list.slice(0, 40);
-  }, [allUsers, search]);
+    const filtered = q ? list.filter((u) => u.name.toLowerCase().includes(q)) : list.slice(0, 40);
+
+    // Hide already-added users from picker
+    const existing = new Set((mentors || []).map((m) => String(m.userId || '')));
+    return filtered.filter((u) => !existing.has(String(u.id)));
+  }, [allUsers, search, mentors]);
 
   const addMentor = async (u) => {
+    if (!canManageEmployees) return;
     const ref = doc(collection(db, STUDIOS, studioId, SUBS.mentors));
     await setDoc(ref, {
       id: ref.id,
@@ -714,17 +996,50 @@ function MentorsBlock({ studioId, mentors, allUsers }) {
     });
   };
 
+  const removeMentor = async (m) => {
+    if (!canManageEmployees) return;
+    const ok = window.confirm(`Remove mentor "${m.name}" from this studio?`);
+    if (!ok) return;
+    try {
+      await deleteDoc(doc(db, STUDIOS, studioId, SUBS.mentors, m.id));
+    } catch (e) {
+      console.error('Remove mentor failed', e);
+      alert('Could not remove mentor.');
+    }
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
       <div className="lg:col-span-3">
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
           {mentors.map((m) => (
-            <div key={m.id} className="rounded-2xl border border-slate-200 bg-white/70 backdrop-blur p-3 flex items-center gap-3">
+            <div
+              key={m.id}
+              className="rounded-2xl border border-slate-200 bg-white/70 backdrop-blur p-3 flex items-center gap-3"
+            >
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={m.photoURL || '/default-avatar.png'} alt={m.name} className="w-10 h-10 rounded-xl object-cover" />
-              <div className="font-medium">{m.name}</div>
+              <img
+                src={m.photoURL || '/default-avatar.png'}
+                alt={m.name}
+                className="w-10 h-10 rounded-xl object-cover"
+              />
+              <div className="min-w-0 flex-1">
+                <div className="font-medium truncate">{m.name}</div>
+                <div className="text-xs text-slate-500 truncate">{m.userId || ''}</div>
+              </div>
+
+              {canManageEmployees ? (
+                <button
+                  onClick={() => removeMentor(m)}
+                  className="p-2 rounded-xl border border-slate-200 bg-white/70 hover:bg-white text-rose-600"
+                  title="Remove mentor"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              ) : null}
             </div>
           ))}
+
           {mentors.length === 0 && (
             <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 backdrop-blur p-4 text-slate-500">
               No mentors yet.
@@ -737,29 +1052,44 @@ function MentorsBlock({ studioId, mentors, allUsers }) {
         <div className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
           <UserPlus className="w-4 h-4" /> Add mentor (from users)
         </div>
-        <div className="relative mb-2">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search users…"
-            className="w-full h-11 pl-9 pr-3 rounded-xl border border-slate-200 bg-white/80 focus:outline-none focus:ring-4 focus:ring-blue-100"
-          />
-        </div>
-        <div className="max-h-64 overflow-auto pr-1 space-y-1">
-          {candidates.map((u) => (
-            <button
-              key={u.id}
-              onClick={() => addMentor(u)}
-              className="w-full text-left rounded-xl border border-slate-200 bg-white/70 hover:bg-white transition p-2 flex items-center gap-3"
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={u.photoURL || '/default-avatar.png'} alt={u.name} className="w-8 h-8 rounded-lg object-cover" />
-              <div className="truncate">{u.name}</div>
-            </button>
-          ))}
-          {candidates.length === 0 && <div className="text-sm text-slate-500">No users.</div>}
-        </div>
+
+        {!canManageEmployees ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-800 text-sm">
+            You do not have permission to manage mentors. (Requires{' '}
+            <span className="font-semibold">manageEmployees</span>)
+          </div>
+        ) : (
+          <>
+            <div className="relative mb-2">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search users…"
+                className="w-full h-11 pl-9 pr-3 rounded-xl border border-slate-200 bg-white/80 focus:outline-none focus:ring-4 focus:ring-blue-100"
+              />
+            </div>
+
+            <div className="max-h-64 overflow-auto pr-1 space-y-1">
+              {candidates.map((u) => (
+                <button
+                  key={u.id}
+                  onClick={() => addMentor(u)}
+                  className="w-full text-left rounded-xl border border-slate-200 bg-white/70 hover:bg-white transition p-2 flex items-center gap-3"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={u.photoURL || '/default-avatar.png'}
+                    alt={u.name}
+                    className="w-8 h-8 rounded-lg object-cover"
+                  />
+                  <div className="truncate">{u.name}</div>
+                </button>
+              ))}
+              {candidates.length === 0 && <div className="text-sm text-slate-500">No users.</div>}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -774,7 +1104,6 @@ function GalleryBlock({ studioId, gallery }) {
     if (!file) return;
     setUploading(true);
     try {
-      // compress gallery image before saving
       let dataUrl = await compressImageToDataURL(file, { maxWidth: 1600, quality: 0.85 });
       if (dataUrl.length > 900_000) {
         const retry = await compressImageToDataURL(file, { maxWidth: 1400, quality: 0.75 });
@@ -782,7 +1111,7 @@ function GalleryBlock({ studioId, gallery }) {
       }
 
       await addDoc(collection(db, STUDIOS, studioId, SUBS.gallery), {
-        dataUrl,                    // << saved directly on the doc
+        dataUrl,
         caption: caption?.trim() || '',
         createdAt: serverTimestamp(),
       });
@@ -801,7 +1130,7 @@ function GalleryBlock({ studioId, gallery }) {
     <div>
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
         {gallery.map((g) => {
-          const src = g.dataUrl || g.url; // support older entries if any
+          const src = g.dataUrl || g.url;
           return (
             <div key={g.id} className="rounded-2xl overflow-hidden border border-slate-200 bg-white/70 backdrop-blur">
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -810,6 +1139,7 @@ function GalleryBlock({ studioId, gallery }) {
             </div>
           );
         })}
+
         {gallery.length === 0 && (
           <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 backdrop-blur p-4 text-slate-500">
             No images yet.
@@ -818,7 +1148,9 @@ function GalleryBlock({ studioId, gallery }) {
       </div>
 
       <div className="rounded-2xl border border-slate-200 bg-white/80 backdrop-blur p-4 mt-4">
-        <div className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2"><Upload className="w-4 h-4" /> Add to gallery</div>
+        <div className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
+          <Upload className="w-4 h-4" /> Add to gallery
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
           <label className="h-11 px-4 rounded-xl border border-dashed border-slate-300 bg-white/80 flex items-center gap-3 cursor-pointer hover:bg-white">
             <Upload className="w-4 h-4 text-slate-500" />
@@ -843,3 +1175,4 @@ function GalleryBlock({ studioId, gallery }) {
     </div>
   );
 }
+
