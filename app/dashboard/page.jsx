@@ -7,7 +7,6 @@ import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Wrench,
-  CheckCircle2,
   ShoppingBag,
   GraduationCap,
   BookOpen,
@@ -30,6 +29,8 @@ import {
   Settings2,
   ChevronDown,
   Shield,
+  Cpu,
+  MessageSquare,
 } from 'lucide-react';
 
 import {
@@ -45,25 +46,63 @@ import {
 
 import { app } from '../lib/firebase';
 import CornerUtilities from '../components/CornerUtilities';
+import { useUser } from '../context/UserContext';
 
 const db = getFirestore(app);
 
 // -----------------------------------------------------------------------------
-// Role detection (adjust to match your stored user shape)
+// Role helpers (supports your real user.roles shape: ["roleDocId", ...] OR objects)
 // -----------------------------------------------------------------------------
-function isSuperAdmin(member) {
+function getAssignedRoleIds(member) {
+  const assigned = member?.roles;
+  if (!assigned) return [];
+  if (Array.isArray(assigned)) {
+    return assigned
+      .map((r) => (typeof r === 'string' ? r : r?.id))
+      .filter(Boolean)
+      .map(String);
+  }
+  if (typeof assigned === 'object') {
+    // If you ever store roles as a map like {roleId:true}
+    return Object.keys(assigned).map(String);
+  }
+  return [];
+}
+
+function isEmployeeFromRoles(member, rolesById) {
+  const ids = getAssignedRoleIds(member);
+  for (const id of ids) {
+    const role = rolesById?.get?.(id);
+    if (role?.isEmployee) return true;
+  }
+  // Optional fallback if you also set a direct flag
+  if (member?.isEmployee === true) return true;
+  return false;
+}
+
+function isSuperAdminFromRoles(member, rolesById) {
   if (!member) return false;
   if (member.isSuperAdmin === true) return true;
   if (typeof member.role === 'string' && member.role.toLowerCase() === 'superadmin') return true;
-  if (Array.isArray(member.roles) && member.roles.map((r) => String(r).toLowerCase()).includes('superadmin')) return true;
-  if (member.roles && typeof member.roles === 'object' && member.roles.superadmin) return true;
-  return true;
+
+  const ids = getAssignedRoleIds(member);
+  for (const id of ids) {
+    const role = rolesById?.get?.(id);
+    const name = String(role?.name || '').toLowerCase();
+    if (name === 'superadmin') return true;
+    // If you decide to add an explicit flag on role docs later:
+    if (role?.isSuperAdmin) return true;
+  }
+  return false;
 }
 
 // -----------------------------------------------------------------------------
-// Actions (shared)
+// Actions
 // -----------------------------------------------------------------------------
 const ADMIN_ACTIONS = [
+  { icon: Cpu, label: 'Machines', desc: 'Machines, logs, maintenance', path: '/machines', tint: 'text-indigo-600', bg: 'from-indigo-50/80 to-white/70' },
+  { icon: MessageSquare, label: 'Messages', desc: 'Broadcasts and announcements', path: '/messages', tint: 'text-indigo-600', bg: 'from-indigo-50/80 to-white/70' },
+
   { icon: Wrench, label: 'Tools', desc: 'Inventory and tools catalog', path: '/tools', tint: 'text-blue-600', bg: 'from-blue-50/80 to-white/70' },
   { icon: ShoppingBag, label: 'Materials', desc: 'Consumables and stock', path: '/materials', tint: 'text-blue-600', bg: 'from-blue-50/80 to-white/70' },
   { icon: GraduationCap, label: 'Certifications', desc: 'Member certifications', path: '/certifications', tint: 'text-amber-600', bg: 'from-amber-50/80 to-white/70' },
@@ -80,10 +119,8 @@ const ADMIN_ACTIONS = [
   { icon: ShieldCheck, label: 'Roles', desc: 'Permissions and access', path: '/roles', tint: 'text-slate-700', bg: 'from-slate-50/80 to-white/70' },
 ];
 
+// Member grid: remove duplicates (Studios / Reservations / What's New are covered by top CTA row)
 const MEMBER_ACTIONS = [
-  { icon: ImageIcon, label: 'Studios', desc: 'Explore studios and projects', path: '/studios', tint: 'text-pink-600', bg: 'from-pink-50/80 to-white/70' },
-  { icon: Sparkles, label: 'What’s New', desc: 'Classes, events, announcements', path: '/discover', tint: 'text-amber-600', bg: 'from-amber-50/80 to-white/70' },
-  { icon: CalendarCheck, label: 'Reservations', desc: 'Book machines and time', path: '/reservations', tint: 'text-emerald-600', bg: 'from-emerald-50/80 to-white/70' },
   { icon: MapPin, label: 'Map', desc: 'Find studios and front desk', path: '/map', tint: 'text-emerald-700', bg: 'from-emerald-50/80 to-white/70' },
   { icon: GraduationCap, label: 'Certifications', desc: 'View your certifications', path: '/certifications', tint: 'text-indigo-600', bg: 'from-indigo-50/80 to-white/70' },
   { icon: BookOpen, label: 'Courses', desc: 'See available courses', path: '/courses', tint: 'text-indigo-600', bg: 'from-indigo-50/80 to-white/70' },
@@ -97,6 +134,14 @@ const MEMBER_ACTIONS = [
 // -----------------------------------------------------------------------------
 export default function DashboardPage() {
   const router = useRouter();
+  const {
+    currentUser,
+    setCurrentUser,
+    loading,
+    rolesById,
+    rolesLoading,
+    refreshRoles,
+  } = useUser();
 
   const [member, setMember] = useState(null);
 
@@ -107,33 +152,55 @@ export default function DashboardPage() {
   const [goodbyeCountdown, setGoodbyeCountdown] = useState(5);
 
   // View switching:
-  // - REGULAR users: default to "regular" (studios-like)
-  // - SUPERADMIN: default to "admin" (traditional)
+  // - non-employee: regular only
+  // - employee: can switch regular/admin
   const [view, setView] = useState('regular'); // 'regular' | 'admin'
 
-  const superAdmin = useMemo(() => isSuperAdmin(member), [member]);
-
-  // Load member + enforce active session
+  // Ensure roles are fresh enough for employee gating (your UserContext also caches them)
   useEffect(() => {
+    if (!rolesLoading && rolesById?.size) return;
+    refreshRoles(false).catch(() => {});
+  }, [rolesLoading, rolesById, refreshRoles]);
+
+  // Prefer context currentUser; fall back to localStorage only if needed.
+  useEffect(() => {
+    if (currentUser) {
+      setMember(currentUser);
+      return;
+    }
     const stored = localStorage.getItem('nova-user');
     if (!stored) {
       router.push('/');
       return;
     }
-
     const parsed = JSON.parse(stored);
     setMember(parsed);
+    // keep context in sync (so other pages behave consistently)
+    setCurrentUser?.(parsed);
+  }, [currentUser, router, setCurrentUser]);
 
-    // Default view selection based on role
-    setView(isSuperAdmin(parsed) ? 'admin' : 'regular');
+  const employee = useMemo(() => isEmployeeFromRoles(member, rolesById), [member, rolesById]);
+  const superAdmin = useMemo(() => isSuperAdminFromRoles(member, rolesById), [member, rolesById]);
+
+  // Default view selection once we can evaluate employee status
+  useEffect(() => {
+    if (!member) return;
+    setView(employee ? 'admin' : 'regular');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [member, employee]);
+
+  // Enforce: admin view only for employees
+  useEffect(() => {
+    if (!member) return;
+    if (!employee && view === 'admin') setView('regular');
+  }, [member, employee, view]);
+
+  // Enforce active session (after member is known)
+  useEffect(() => {
+    if (!member?.id) return;
 
     const checkActiveSession = async () => {
-      const q = query(
-        collection(db, 'sessions'),
-        where('member.id', '==', parsed.id),
-        where('endTime', '==', null)
-      );
-
+      const q = query(collection(db, 'sessions'), where('member.id', '==', member.id), where('endTime', '==', null));
       const snapshot = await getDocs(q);
       if (!snapshot.empty) {
         const s = snapshot.docs[0];
@@ -145,7 +212,7 @@ export default function DashboardPage() {
     };
 
     checkActiveSession().catch(() => router.push('/checkin'));
-  }, [router]);
+  }, [member?.id, router]);
 
   // Goodbye countdown
   useEffect(() => {
@@ -172,25 +239,30 @@ export default function DashboardPage() {
 
   const displayName = member?.name || member?.fullName || 'there';
 
-  // Search for the studios-like regular dashboard
+  // Search for regular dashboard
   const [search, setSearch] = useState('');
   const regularFiltered = useMemo(() => {
     const q = (search || '').toLowerCase().trim();
     if (!q) return MEMBER_ACTIONS;
-    return MEMBER_ACTIONS.filter(
-      (a) => a.label.toLowerCase().includes(q) || a.desc.toLowerCase().includes(q)
-    );
+    return MEMBER_ACTIONS.filter((a) => a.label.toLowerCase().includes(q) || a.desc.toLowerCase().includes(q));
   }, [search]);
 
-  // Admin grid can also be searchable (nice for large sets)
+  // Admin search
   const [adminSearch, setAdminSearch] = useState('');
   const adminFiltered = useMemo(() => {
     const q = (adminSearch || '').toLowerCase().trim();
     if (!q) return ADMIN_ACTIONS;
-    return ADMIN_ACTIONS.filter(
-      (a) => a.label.toLowerCase().includes(q) || a.desc.toLowerCase().includes(q)
-    );
+    return ADMIN_ACTIONS.filter((a) => a.label.toLowerCase().includes(q) || a.desc.toLowerCase().includes(q));
   }, [adminSearch]);
+
+  // Loading state (context + member)
+  if (loading && !member) {
+    return (
+      <div className="min-h-screen grid place-items-center text-sm text-slate-500 bg-gradient-to-br from-white via-slate-100 to-white">
+        Loading…
+      </div>
+    );
+  }
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white text-slate-900">
@@ -198,7 +270,7 @@ export default function DashboardPage() {
       <BokehBackground />
 
       <div className="max-w-7xl mx-auto px-6 py-10">
-        {/* Header (no back button) */}
+        {/* Header */}
         <motion.header
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -228,11 +300,16 @@ export default function DashboardPage() {
                     Superadmin
                   </span>
                 ) : null}
+                {employee && !superAdmin ? (
+                  <span className="hidden sm:inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full bg-white/70 border border-slate-200 text-slate-800">
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    Employee
+                  </span>
+                ) : null}
               </div>
+
               <p className="text-slate-600 mt-1 truncate">
-                {view === 'regular'
-                  ? 'Your dashboard'
-                  : 'Admin console'}
+                {view === 'regular' ? 'Your dashboard' : 'Employee console'}
                 {sessionType ? ` • Session: ${sessionType}` : ''}
               </p>
             </div>
@@ -247,15 +324,13 @@ export default function DashboardPage() {
               Profile
             </Link>
 
-            {/* Toggle (only superadmin) — regular is studios-like, admin is traditional */}
-            {superAdmin ? (
+            {/* Toggle: ONLY for employees */}
+            {employee ? (
               <div className="h-10 rounded-full border border-slate-200 bg-white/70 backdrop-blur shadow-sm p-1 flex items-center">
                 <button
                   onClick={() => setView('regular')}
                   className={`h-8 px-4 rounded-full text-sm font-semibold transition ${
-                    view === 'regular'
-                      ? 'bg-slate-900 text-white'
-                      : 'text-slate-700 hover:bg-white'
+                    view === 'regular' ? 'bg-slate-900 text-white' : 'text-slate-700 hover:bg-white'
                   }`}
                 >
                   Regular
@@ -263,9 +338,7 @@ export default function DashboardPage() {
                 <button
                   onClick={() => setView('admin')}
                   className={`h-8 px-4 rounded-full text-sm font-semibold transition inline-flex items-center gap-2 ${
-                    view === 'admin'
-                      ? 'bg-slate-900 text-white'
-                      : 'text-slate-700 hover:bg-white'
+                    view === 'admin' ? 'bg-slate-900 text-white' : 'text-slate-700 hover:bg-white'
                   }`}
                 >
                   <LayoutDashboard className="w-4 h-4" />
@@ -297,15 +370,14 @@ export default function DashboardPage() {
               <div className="w-full max-w-lg rounded-[2rem] border border-slate-200 bg-white/70 backdrop-blur p-8 shadow-xl text-center">
                 <h2 className="text-2xl font-bold">Have a great day!</h2>
                 <p className="text-sm text-slate-600 mt-2">
-                  Returning to home screen in{' '}
-                  <span className="font-semibold">{goodbyeCountdown}</span> second
+                  Returning to home screen in <span className="font-semibold">{goodbyeCountdown}</span> second
                   {goodbyeCountdown !== 1 ? 's' : ''}.
                 </p>
               </div>
             </motion.div>
-          ) : view === 'admin' && superAdmin ? (
+          ) : view === 'admin' && employee ? (
             // -----------------------------------------------------------------
-            // ADMIN (traditional) — refined version of your existing grid
+            // ADMIN (Employee) — visible only to employees, role IDs resolved via rolesById
             // -----------------------------------------------------------------
             <motion.section
               key="admin"
@@ -321,7 +393,10 @@ export default function DashboardPage() {
                     <LayoutDashboard className="w-5 h-5 text-slate-700" />
                     <div>
                       <div className="font-bold text-slate-900">Admin Console</div>
-                      <div className="text-sm text-slate-600">Operational tools and management.</div>
+                      <div className="text-sm text-slate-600">
+                        Operational tools and management.
+                        {rolesLoading ? ' (Loading roles…)': ''}
+                      </div>
                     </div>
                   </div>
 
@@ -373,7 +448,7 @@ export default function DashboardPage() {
                         href="/"
                         className="h-10 px-4 rounded-full bg-slate-900 text-white font-semibold hover:opacity-90 inline-flex items-center gap-2"
                       >
-                        <CheckCircle2 className="w-4 h-4" />
+                        <CalendarCheck className="w-4 h-4" />
                         Home
                       </Link>
                     </div>
@@ -383,7 +458,7 @@ export default function DashboardPage() {
             </motion.section>
           ) : (
             // -----------------------------------------------------------------
-            // REGULAR (studios-like) — modern, Apple-like, card-first layout
+            // REGULAR (Members) — no duplicates; CTA row is the only place for these
             // -----------------------------------------------------------------
             <motion.section
               key="regular"
@@ -428,27 +503,15 @@ export default function DashboardPage() {
                 <div className="p-6">
                   {/* Primary big CTA row */}
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-                    <BigCta
-                      title="Explore Studios"
-                      subtitle="See spaces, gear, and projects"
-                      href="/studios"
-                      icon={ImageIcon}
-                    />
-                    <BigCta
-                      title="Book a Reservation"
-                      subtitle="Machines and time slots"
-                      href="/reservations"
-                      icon={CalendarCheck}
-                    />
-                    <BigCta
-                      title="See What’s New"
-                      subtitle="Events, classes, announcements"
-                      href="/discover"
-                      icon={Sparkles}
-                    />
+                    {/* per request: NOT "Explore Studios" — just "Studios" */}
+                    <BigCta title="Studios" subtitle="Spaces, gear, and projects" href="/studios" icon={ImageIcon} />
+
+                    <BigCta title="Reservations" subtitle="Book machines and time" href="/reservations" icon={CalendarCheck} />
+
+                    <BigCta title="What’s New" subtitle="Events, classes, announcements" href="/discover" icon={Sparkles} />
                   </div>
 
-                  {/* Card grid (studios-like) */}
+                  {/* Secondary grid (no duplicates of Studios/Reservations/What’s New) */}
                   <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
                     {regularFiltered.map((a) => (
                       <ActionCard
@@ -465,9 +528,7 @@ export default function DashboardPage() {
 
                   {/* Footer strip */}
                   <div className="mt-6 rounded-[1.6rem] border border-slate-200 bg-white/70 backdrop-blur p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                    <div className="text-sm text-slate-600">
-                      Need help? The front desk can assist with anything.
-                    </div>
+                    <div className="text-sm text-slate-600">Need help? The front desk can assist with anything.</div>
                     <div className="flex gap-2">
                       <Link
                         href="/about"
@@ -552,8 +613,7 @@ function BigCta({ title, subtitle, href, icon: Icon }) {
         <div
           className="absolute -top-24 -right-24 w-[300px] h-[300px] rounded-full blur-3xl"
           style={{
-            background:
-              'radial-gradient(40% 40% at 50% 50%, rgba(99,102,241,0.22), rgba(99,102,241,0))',
+            background: 'radial-gradient(40% 40% at 50% 50%, rgba(99,102,241,0.22), rgba(99,102,241,0))',
           }}
         />
       </div>

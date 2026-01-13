@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import Image from 'next/image';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CalendarCheck, User, Users, CheckCircle2, LayoutDashboard } from 'lucide-react';
 import {
@@ -99,13 +98,14 @@ export default function CheckInPage() {
   useEffect(() => {
     if (loading) return;
     if (!member) return;
-    if (isEmployee) return;        // employees must choose Clock In vs Check In
-    if (showNextActions) return;   // already on card (e.g., resumed open session)
+    if (isEmployee) return; // employees must choose Clock In vs Check In
+    if (showNextActions) return; // already on card (e.g., resumed open session)
     if (autoStartedRef.current) return;
 
     autoStartedRef.current = true;
-    startSession('CheckIn');       // fire-and-forget; UI will switch when setShowNextActions(true)
-  }, [loading, member, isEmployee, showNextActions]); // eslint-disable-line react-hooks/exhaustive-deps
+    startSession('CheckIn');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, member, isEmployee, showNextActions]);
 
   // End the current session, then go home
   const checkOutNow = async () => {
@@ -162,170 +162,147 @@ export default function CheckInPage() {
   return (
     <Shell>
       <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-white via-slate-100 to-white flex items-center justify-center text-slate-900">
-{isEmployee && !showNextActions && (
-  <motion.div
-    initial={{ opacity: 0, y: 20 }}
-    animate={{ opacity: 1, y: 0 }}
-    transition={{ duration: 0.8, ease: 'easeOut' }}
-    className="relative z-10 backdrop-blur-md bg-white/50 border border-slate-200 rounded-[2rem] shadow-xl w-[90%] max-w-3xl p-10 space-y-6"
-  >
-    <div className="space-y-6 flex flex-col items-center">
-      <div className="w-[96px] h-[96px] rounded-full overflow-hidden border border-slate-300 shadow-md grid place-items-center bg-gradient-to-br from-blue-500 to-indigo-500 text-white">
-        <User className="w-10 h-10" />
-      </div>
-      <h2 className="text-3xl font-bold text-center">Welcome, {displayName}</h2>
-      <p className="text-sm text-slate-600 text-center max-w-sm">
-        Are you starting a shift or just visiting?
-      </p>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-md">
-        {/* Clock In + Check In buttons unchanged */}
-      </div>
-    </div>
-  </motion.div>
-)}
-
-
-        {/* WHAT'S-NEXT CARD (shows for everyone after session starts or resumes) */}
-        {/* WHAT'S-NEXT CARD: shows for everyone once a session exists */}
-<AnimatePresence>
-  {showNextActions && (
-    <motion.div
-      key="next-actions-overlay"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-transparent"
-    >
-      <motion.div
-        initial={{ y: 24, opacity: 0, scale: 0.98 }}
-        animate={{ y: 0, opacity: 1, scale: 1 }}
-        exit={{ y: 12, opacity: 0, scale: 0.98 }}
-        transition={{ type: 'spring', stiffness: 320, damping: 26 }}
-        className="w-[min(92vw,40rem)] rounded-[2rem] bg-white/85 backdrop-blur-xl border border-white/40 shadow-2xl p-7"
-      >
-        {/* header */}
-        <div className="text-center">
-          <div className="w-16 h-16 rounded-2xl bg-emerald-100 text-emerald-700 grid place-items-center mx-auto mb-3 shadow-sm">
-            <CalendarCheck className="w-8 h-8" />
-          </div>
-          <h3 className="text-2xl font-bold">
-            Hi {member?.fullName || member?.name || 'there'}, you’re {lastSessionType === 'ClockIn' ? 'clocked in' : 'checked in'}!
-          </h3>
-          <p className="text-slate-600 mt-1">
-            What would you like to do next?
-            <span className="ml-2 text-xs text-slate-500">Auto closing in {nextCountdown}s</span>
-          </p>
-        </div>
-
-        {/* actions grid — (your unified tiles here) */}
-<div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-7">
-
-  {/* Dashboard */}
-  <button
-    onClick={() => router.push('/dashboard')}
-    className="group rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-slate-900/20 via-blue-500/30 to-sky-400/30 shadow-sm"
-  >
-    <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
-      <div className="rounded-2xl bg-slate-900 text-white/95 w-12 h-12 grid place-items-center shadow">
-        <LayoutDashboard className="w-6 h-6" />
-      </div>
-      <div>
-        <div className="font-semibold text-base md:text-lg">Go to Dashboard</div>
-        <div className="text-sm text-slate-500">See your sessions & activity</div>
-      </div>
-    </div>
-  </button>
-
-  {/* My Profile */}
-  <button
-    onClick={() => router.push(`/users/${member?.id || member?.docId}`)}
-    className="group rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-blue-500/25 via-sky-400/25 to-indigo-500/25 shadow-sm"
-  >
-    <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
-      <div className="rounded-2xl bg-blue-600 text-white w-12 h-12 grid place-items-center shadow">
-        <User className="w-6 h-6" />
-      </div>
-      <div>
-        <div className="font-semibold text-base md:text-lg">My Profile</div>
-        <div className="text-sm text-slate-500">Membership & details</div>
-      </div>
-    </div>
-  </button>
-
-  {/* Add Guests (hide for ClockIn) */}
-  {lastSessionType !== 'ClockIn' && (
-    <button
-      onClick={() => router.push('/dashboard?pane=guests')}
-      className="group rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-emerald-500/25 via-teal-400/25 to-green-500/25 shadow-sm"
-    >
-      <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
-        <div className="rounded-2xl bg-emerald-600 text-white w-12 h-12 grid place-items-center shadow">
-          <Users className="w-6 h-6" />
-        </div>
-        <div>
-          <div className="font-semibold text-base md:text-lg">Add Guests</div>
-          <div className="text-sm text-slate-500">Include friends on your visit</div>
-        </div>
-      </div>
-    </button>
-  )}
-
-  {/* That’s everything */}
-  <button
-    onClick={() => router.push('/')}
-    className="group rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-slate-400/25 via-slate-300/25 to-slate-500/25 shadow-sm"
-  >
-    <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
-      <div className="rounded-2xl bg-slate-200 text-slate-800 w-12 h-12 grid place-items-center shadow">
-        <CheckCircle2 className="w-6 h-6" />
-      </div>
-      <div>
-        <div className="font-semibold text-base md:text-lg">That’s everything</div>
-        <div className="text-sm text-slate-500">Return to home</div>
-      </div>
-    </div>
-  </button>
-</div>
-
-        {/* full width checkout */}
-        <div className="mt-4">
-  <button
-    onClick={checkOutNow}
-    className="group w-full rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-rose-600/35 via-rose-500/25 to-pink-500/25 shadow-md"
-  >
-    <div className="rounded-[1.15rem] bg-white/70 backdrop-blur-xl border border-white/40 hover:bg-white/90 transition p-5 text-left flex items-center gap-4">
-      <div className="rounded-2xl bg-rose-600 text-white w-12 h-12 grid place-items-center shadow">
-        <CalendarCheck className="w-6 h-6" />
-      </div>
-      <div>
-        <div className="font-semibold text-base md:text-lg">
-          {lastSessionType === 'ClockIn' ? 'Clock Out' : 'Check Out'}
-        </div>
-        <div className="text-sm text-rose-600">
-          {lastSessionType === 'ClockIn' ? 'End your shift' : 'End your visit'}
-        </div>
-      </div>
-    </div>
-  </button>
-</div>
-
-        {/* ... your Check/Clock Out button ... */}
-
-        <div className="flex justify-end mt-4">
-          <button
-            onClick={() => setShowNextActions(false)}
-            className="px-5 h-12 rounded-full bg-slate-900 text-white text-base font-medium hover:opacity-90"
+        {isEmployee && !showNextActions && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.8, ease: 'easeOut' }}
+            className="relative z-10 backdrop-blur-md bg-white/50 border border-slate-200 rounded-[2rem] shadow-xl w-[90%] max-w-3xl p-10 space-y-6"
           >
-            Close
-          </button>
-        </div>
-      </motion.div>
-    </motion.div>
-  )}
-</AnimatePresence>
+            <div className="space-y-6 flex flex-col items-center">
+              <div className="w-[96px] h-[96px] rounded-full overflow-hidden border border-slate-300 shadow-md grid place-items-center bg-gradient-to-br from-blue-500 to-indigo-500 text-white">
+                <User className="w-10 h-10" />
+              </div>
+              <h2 className="text-3xl font-bold text-center">Welcome, {displayName}</h2>
+              <p className="text-sm text-slate-600 text-center max-w-sm">
+                Are you starting a shift or just visiting?
+              </p>
 
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-md">
+                {/* Clock In + Check In buttons unchanged */}
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* WHAT'S-NEXT CARD: shows for everyone once a session exists */}
+        <AnimatePresence>
+          {showNextActions && (
+            <motion.div
+              key="next-actions-overlay"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[60] flex items-center justify-center bg-transparent"
+            >
+              <motion.div
+                initial={{ y: 24, opacity: 0, scale: 0.98 }}
+                animate={{ y: 0, opacity: 1, scale: 1 }}
+                exit={{ y: 12, opacity: 0, scale: 0.98 }}
+                transition={{ type: 'spring', stiffness: 320, damping: 26 }}
+                className="w-[min(92vw,40rem)] rounded-[2rem] bg-white/85 backdrop-blur-xl border border-white/40 shadow-2xl p-7"
+              >
+                {/* header */}
+                <div className="text-center">
+                  <div className="w-16 h-16 rounded-2xl bg-emerald-100 text-emerald-700 grid place-items-center mx-auto mb-3 shadow-sm">
+                    <CalendarCheck className="w-8 h-8" />
+                  </div>
+                  <h3 className="text-2xl font-bold">
+                    Hi {member?.fullName || member?.name || 'there'}, you’re{' '}
+                    {lastSessionType === 'ClockIn' ? 'clocked in' : 'checked in'}!
+                  </h3>
+                  <p className="text-slate-600 mt-1">
+                    What would you like to do next?
+                   <span className="ml-2 text-sm font-medium text-slate-600">
+  Auto closing in {nextCountdown}s
+</span>
+
+                  </p>
+                </div>
+
+                {/* actions grid — Clock Out is now a tile; "Nope, that's all" is now the bottom tile */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-7">
+                  {/* Dashboard */}
+                 {/* Dashboard — FULL WIDTH */}
+<button
+  onClick={() => router.push('/dashboard')}
+  className="group sm:col-span-2 rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-slate-900/20 via-blue-500/30 to-sky-400/30 shadow-sm"
+>
+  <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
+    <div className="rounded-2xl bg-slate-900 text-white/95 w-12 h-12 grid place-items-center shadow">
+      <LayoutDashboard className="w-6 h-6" />
+    </div>
+    <div>
+      <div className="font-semibold text-base md:text-lg">Go to Dashboard</div>
+      <div className="text-sm text-slate-500">Everything you can do next</div>
+    </div>
+  </div>
+</button>
+
+
+                  {/* Add Guests (hide for ClockIn) */}
+                  {lastSessionType !== 'ClockIn' && (
+                    <button
+                      onClick={() => router.push('/dashboard?pane=guests')}
+                      className="group rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-emerald-500/25 via-teal-400/25 to-green-500/25 shadow-sm"
+                    >
+                      <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
+                        <div className="rounded-2xl bg-emerald-600 text-white w-12 h-12 grid place-items-center shadow">
+                          <Users className="w-6 h-6" />
+                        </div>
+                        <div>
+                          <div className="font-semibold text-base md:text-lg">Add Guests</div>
+                          <div className="text-sm text-slate-500">Include friends on your visit</div>
+                        </div>
+                      </div>
+                    </button>
+                  )}
+
+                  {/* Clock Out / Check Out (MOVED INTO GRID) */}
+                  <button
+                    onClick={checkOutNow}
+                    className="group rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-rose-600/35 via-rose-500/25 to-pink-500/25 shadow-sm"
+                  >
+                    <div className="rounded-[1.15rem] bg-white/70 backdrop-blur-xl border border-white/40 hover:bg-white/90 transition p-5 text-left flex items-center gap-4">
+                      <div className="rounded-2xl bg-rose-600 text-white w-12 h-12 grid place-items-center shadow">
+                        <CalendarCheck className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <div className="font-semibold text-base md:text-lg">
+                          {lastSessionType === 'ClockIn' ? 'Clock Out' : 'Check Out'}
+                        </div>
+                        <div className="text-sm text-rose-600">
+                          {lastSessionType === 'ClockIn' ? 'End your shift' : 'End your visit'}
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+
+                  {/* Nope, that's all (REPLACES "That's everything" + moved to end) */}
+<button
+  onClick={() => router.push('/')}
+  className="group sm:col-span-2 rounded-[1.35rem] p-[2px] bg-gradient-to-tr from-slate-400/25 via-slate-300/25 to-slate-500/25 shadow-sm"
+>
+  <div className="rounded-[1.15rem] bg-white/75 backdrop-blur-xl border border-white/40 hover:bg-white/85 transition p-5 text-left flex items-center gap-4">
+    <div className="rounded-2xl bg-slate-200 text-slate-800 w-12 h-12 grid place-items-center shadow">
+      <CheckCircle2 className="w-6 h-6" />
+    </div>
+    <div>
+      <div className="font-semibold text-base md:text-lg">Nope, that’s all</div>
+      <div className="text-sm text-slate-500">Return to home</div>
+    </div>
+  </div>
+</button>
+
+                </div>
+
+                {/* Close button removed completely */}
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </Shell>
   );
 }
+
