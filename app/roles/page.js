@@ -29,7 +29,9 @@ const ALL_PERMISSIONS = [
   'viewPayments',
   'createReservations',
   'viewSessions',
-  'assignCertifications'
+  'assignCertifications',
+  'manageEmployees',  
+  'createMachines'
 ];
 
 export default function RolesPage() {
