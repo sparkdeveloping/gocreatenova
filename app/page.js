@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -20,6 +20,7 @@ import {
   ShieldAlert,
   Clock8,
 } from 'lucide-react';
+
 import {
   getFirestore,
   collection,
@@ -31,6 +32,7 @@ import {
   doc,
   serverTimestamp,
   getDocFromServer,
+  limit,
 } from 'firebase/firestore';
 
 import { app } from './lib/firebase';
@@ -68,6 +70,7 @@ function toDateSafe(v) {
   }
   return null;
 }
+
 function getMembershipStatus(user) {
   const now = new Date();
   const sub = user?.activeSubscription || null;
@@ -109,6 +112,7 @@ function getMembershipStatus(user) {
     hadAny: false,
   };
 }
+
 function formatCountdown(target) {
   const t = toDateSafe(target);
   if (!t) return '—';
@@ -132,6 +136,42 @@ async function getFreshUser(db, userLike) {
     if (snap.exists()) return { id: snap.id, ...snap.data() };
   } catch (_) {}
   return userLike;
+}
+
+// Authoritative Firestore-first badge lookup (fixes “new user doesn’t exist yet”)
+async function findUserByBadgeDirect(db, badgeCode) {
+  const code = String(badgeCode || '').trim();
+  if (code.length !== 5) return null;
+  const n = Number(code);
+
+  // Preferred schema: users.badge.id
+  try {
+    const q1 = query(collection(db, 'users'), where('badge.id', '==', code), limit(1));
+    const s1 = await getDocs(q1);
+    if (!s1.empty) return { id: s1.docs[0].id, ...s1.docs[0].data() };
+  } catch (_) {}
+
+  // Preferred schema: users.badge.badgeNumber
+  try {
+    const q2 = query(collection(db, 'users'), where('badge.badgeNumber', '==', n), limit(1));
+    const s2 = await getDocs(q2);
+    if (!s2.empty) return { id: s2.docs[0].id, ...s2.docs[0].data() };
+  } catch (_) {}
+
+  // Optional legacy fallbacks (safe)
+  try {
+    const q3 = query(collection(db, 'users'), where('badgeNumber', '==', n), limit(1));
+    const s3 = await getDocs(q3);
+    if (!s3.empty) return { id: s3.docs[0].id, ...s3.docs[0].data() };
+  } catch (_) {}
+
+  try {
+    const q4 = query(collection(db, 'users'), where('badgeId', '==', code), limit(1));
+    const s4 = await getDocs(q4);
+    if (!s4.empty) return { id: s4.docs[0].id, ...s4.docs[0].data() };
+  } catch (_) {}
+
+  return null;
 }
 
 // —————————————————————————————————————————————
@@ -196,6 +236,7 @@ export default function NovaPublicHome() {
   // --- commit dedupe ---
   const lastCommitRef = useRef({ code: '', at: 0 });
   const pendingCommitRef = useRef(null);
+
   function requestCommit(raw) {
     const c = clamp5(raw || '');
     if (c.length < 5) return;
@@ -215,14 +256,12 @@ export default function NovaPublicHome() {
 
   // If signup just finished, invalidate local pools quickly so the next scan is always fresh.
   useEffect(() => {
-    // You can set this flag in signup page right before redirect:
-    // localStorage.setItem('nova-users-dirty', String(Date.now()));
+    // signup page should do: localStorage.setItem('nova-users-dirty', String(Date.now()));
     const dirty = localStorage.getItem('nova-users-dirty');
     if (dirty) {
-      // Clear to avoid repeated work
       localStorage.removeItem('nova-users-dirty');
-      // Force-load a fresh users list in the background (used for wizard search)
       ensureUsersLoaded(true).catch(() => {});
+      refreshRoles(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -303,7 +342,7 @@ export default function NovaPublicHome() {
   };
 
   // —————————————————————————————————————————————
-  // MAIN SCAN HANDLER (with membership checks)
+  // MAIN SCAN HANDLER (Firestore-first + membership checks)
   // —————————————————————————————————————————————
   const proceedToCheckin = (hitId, data) => {
     const scanned = { id: hitId, ...data };
@@ -317,15 +356,18 @@ export default function NovaPublicHome() {
       const badgeCode = clamp5(code);
       if (badgeCode.length !== 5) return;
 
-      // prefer context users; fall back to localUsers
-      const pool = Array.isArray(allUsers) && allUsers.length > 0 ? allUsers : localUsers;
+      // 1) Authoritative direct Firestore lookup FIRST (fixes “new member doesn’t exist yet”)
+      let hit = await findUserByBadgeDirect(db, badgeCode);
 
-      // Fast path via badge index + pool; allow server fallback if pool/index misses.
-      const hit = await findUserByBadge(badgeCode, {
-        userPool: pool,
-        allowFirestoreFallback: true,
-        allowDirectWhereQuery: true, // IMPORTANT: discover new badge links without page reload
-      });
+      // 2) Optional: fall back to your pooled/index approach
+      if (!hit) {
+        const pool = Array.isArray(allUsers) && allUsers.length > 0 ? allUsers : localUsers;
+        hit = await findUserByBadge(badgeCode, {
+          userPool: pool,
+          allowFirestoreFallback: true,
+          allowDirectWhereQuery: true,
+        });
+      }
 
       if (!hit) {
         const ref = await addDoc(collection(db, 'scans'), {
@@ -344,6 +386,11 @@ export default function NovaPublicHome() {
 
       // CRITICAL: refresh user from server so membership updates are recognized immediately
       const userDoc = await getFreshUser(db, hit);
+
+      // keep local badge index hot after successful scan (optional)
+      try {
+        updateLocalBadgeIndex(userDoc.id, badgeCode);
+      } catch (_) {}
 
       const matchedUserMinimal = {
         id: userDoc.id,
@@ -424,6 +471,7 @@ export default function NovaPublicHome() {
     setShowRelinkModal(true);
     resetBuffer();
   }
+
   function closeRelinkAndWizard() {
     setShowRelinkModal(false);
     setShowWizard(false);
@@ -528,8 +576,8 @@ export default function NovaPublicHome() {
         setResults([]);
         return;
       }
-      const starts = [],
-        contains = [];
+      const starts = [];
+      const contains = [];
       for (const u of allUsersIndexed) {
         if (!u.nameNorm && !u.emailNorm) continue;
         const nameStarts = u.nameNorm.split(' ').some((w) => w.startsWith(q));
@@ -686,7 +734,7 @@ export default function NovaPublicHome() {
               </div>
             </div>
 
-            {/* Gray scan glyph — aligned under the copy column */}
+            {/* Gray scan glyph */}
             <div className="absolute" style={{ left: 40, top: '52%', transform: 'translateY(-50%)' }}>
               <motion.div
                 animate={{
@@ -703,7 +751,7 @@ export default function NovaPublicHome() {
               </motion.div>
             </div>
 
-            {/* BIG arrow & "Scan here" — inside the panel bottom-left */}
+            {/* BIG arrow & "Scan here" */}
             <div className="absolute z-10 left-7 bottom-6 pointer-events-none">
               <motion.div
                 initial={{ y: 0 }}
@@ -727,9 +775,8 @@ export default function NovaPublicHome() {
             />
           </section>
 
-          {/* RIGHT: Quick Actions — centered vertically */}
+          {/* RIGHT: Quick Actions */}
           <aside className="flex flex-col items-stretch justify-center">
-            {/* Date + Time (with seconds) */}
             <div className="flex items-center justify-center gap-3 mb-2">
               <div className="rounded-2xl px-4 py-2 bg-white/60 backdrop-blur border border-slate-200 shadow-sm text-slate-700 text-sm font-semibold">
                 {dateStr}
@@ -802,7 +849,7 @@ export default function NovaPublicHome() {
         <Image src="/Logo.svg" alt="GoCreate Nova" width={84} height={84} priority />
       </div>
 
-      {/* Heads-up modal: membership expiring soon */}
+      {/* Heads-up modal */}
       <AnimatePresence>
         {!!headsUp && (
           <motion.div
@@ -856,7 +903,7 @@ export default function NovaPublicHome() {
         )}
       </AnimatePresence>
 
-      {/* Block modal: membership required / expired */}
+      {/* Block modal */}
       <AnimatePresence>
         {!!blockInfo && (
           <motion.div
@@ -913,7 +960,7 @@ export default function NovaPublicHome() {
         )}
       </AnimatePresence>
 
-      {/* Relink / Assistance modal (not found / error) */}
+      {/* Relink / Assistance modal */}
       <AnimatePresence>
         {showRelinkModal && !showWizard && (
           <motion.div
@@ -1008,7 +1055,6 @@ export default function NovaPublicHome() {
                 )}
               </div>
 
-              {/* Search input */}
               <div className="mt-5">
                 <label className="block text-sm font-medium text-slate-700 mb-1">Search name</label>
                 <div className="flex gap-2">
@@ -1033,7 +1079,6 @@ export default function NovaPublicHome() {
                 </p>
               </div>
 
-              {/* Results */}
               <div className="mt-5 space-y-2 max-h-64 overflow-auto pr-1">
                 {results.length === 0 && !isSearching && (
                   <div className="text-slate-500 text-sm">No results yet — try searching your full name.</div>
@@ -1060,7 +1105,6 @@ export default function NovaPublicHome() {
                 ))}
               </div>
 
-              {/* Confirm link */}
               <div className="mt-6 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                 <button
                   disabled={!selectedUser || linking}
@@ -1090,7 +1134,6 @@ export default function NovaPublicHome() {
         )}
       </AnimatePresence>
 
-      {/* Animated gradient text CSS */}
       <style jsx global>{`
         .gradient-text {
           background: linear-gradient(90deg, #4f46e5, #22d3ee, #4f46e5);
@@ -1101,15 +1144,9 @@ export default function NovaPublicHome() {
           animation: gc-shimmer 3s ease-in-out infinite;
         }
         @keyframes gc-shimmer {
-          0% {
-            background-position: 0% 50%;
-          }
-          50% {
-            background-position: 100% 50%;
-          }
-          100% {
-            background-position: 0% 50%;
-          }
+          0% { background-position: 0% 50%; }
+          50% { background-position: 100% 50%; }
+          100% { background-position: 0% 50%; }
         }
       `}</style>
     </div>
