@@ -5,6 +5,8 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
+import { onSnapshot } from 'firebase/firestore';
+
 import {
   ScanLine,
   UserPlus,
@@ -111,6 +113,61 @@ function getMembershipStatus(user) {
     cycle: null,
     hadAny: false,
   };
+
+  
+}
+function liveResolveUserByBadge(db, badgeCode, { timeoutMs = 3500 } = {}) {
+  const code = String(badgeCode || '').trim();
+  const n = Number(code);
+
+  return new Promise((resolve) => {
+    let done = false;
+    const cleanup = [];
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      cleanup.forEach((u) => {
+        try { u(); } catch {}
+      });
+      resolve(val || null);
+    };
+
+    // Timer safety
+    const t = setTimeout(() => finish(null), timeoutMs);
+    cleanup.push(() => clearTimeout(t));
+
+    // Listener 1: badge.id
+    try {
+      const q1 = query(collection(db, 'users'), where('badge.id', '==', code), limit(1));
+      const u1 = onSnapshot(
+        q1,
+        (snap) => {
+          if (!snap.empty) {
+            const d = snap.docs[0];
+            finish({ id: d.id, ...d.data() });
+          }
+        },
+        () => {}
+      );
+      cleanup.push(u1);
+    } catch {}
+
+    // Listener 2: badge.badgeNumber
+    try {
+      const q2 = query(collection(db, 'users'), where('badge.badgeNumber', '==', n), limit(1));
+      const u2 = onSnapshot(
+        q2,
+        (snap) => {
+          if (!snap.empty) {
+            const d = snap.docs[0];
+            finish({ id: d.id, ...d.data() });
+          }
+        },
+        () => {}
+      );
+      cleanup.push(u2);
+    } catch {}
+  });
 }
 
 function formatCountdown(target) {
@@ -369,20 +426,35 @@ export default function NovaPublicHome() {
         });
       }
 
-      if (!hit) {
-        const ref = await addDoc(collection(db, 'scans'), {
-          badgeCode,
-          matchedUserId: null,
-          user: null,
-          status: 'not_found',
-          createdAt: serverTimestamp(),
-          kioskId,
-        });
-        setPendingScanId(ref.id);
-        setPendingBadgeCode(badgeCode);
-        openRelinkModal();
-        return;
-      }
+
+
+     if (!hit) {
+  // LIVE fallback: wait briefly for Firestore to “catch up” to a just-created user.
+  const liveHit = await liveResolveUserByBadge(db, badgeCode, { timeoutMs: 3500 });
+
+  if (liveHit) {
+    const userDoc = await getFreshUser(db, liveHit);
+    try { updateLocalBadgeIndex(userDoc.id, badgeCode); } catch {}
+    // continue with the rest of your existing membership gate flow...
+    // (i.e., create scan log, check status, proceedToCheckin, etc.)
+    // easiest: set hit=userDoc then let the existing code continue:
+    hit = userDoc;
+  } else {
+    const ref = await addDoc(collection(db, 'scans'), {
+      badgeCode,
+      matchedUserId: null,
+      user: null,
+      status: 'not_found',
+      createdAt: serverTimestamp(),
+      kioskId,
+    });
+    setPendingScanId(ref.id);
+    setPendingBadgeCode(badgeCode);
+    openRelinkModal();
+    return;
+  }
+}
+
 
       // CRITICAL: refresh user from server so membership updates are recognized immediately
       const userDoc = await getFreshUser(db, hit);
